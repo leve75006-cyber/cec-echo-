@@ -1,0 +1,42 @@
+const express = require('express');
+const router = express.Router();
+const { 
+  getMessages, 
+  getDirectMessages, 
+  sendMessage, 
+  createGroup, 
+  getGroups, 
+  getGroup, 
+  addMemberToGroup,
+  initiateCall,
+  updateCallStatus
+} = require('../controllers/chatController');
+const { protect } = require('../middleware/auth');
+
+// Messages
+router.route('/messages')
+  .get(protect, getMessages)
+  .post(protect, sendMessage);
+
+router.route('/messages/:userId')
+  .get(protect, getDirectMessages);
+
+// Groups
+router.route('/groups')
+  .get(protect, getGroups)
+  .post(protect, createGroup);
+
+router.route('/groups/:id')
+  .get(protect, getGroup);
+
+router.route('/groups/add-member/:id')
+  .put(protect, addMemberToGroup);
+
+// Calls
+router.route('/calls')
+  .post(protect, initiateCall);
+
+router.route('/calls/:id')
+  .put(protect, updateCallStatus);
+
+module.exports = router;

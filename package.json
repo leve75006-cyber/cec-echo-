@@ -1,0 +1,25 @@
+{
+  "name": "cec-echo-platform",
+  "version": "1.0.0",
+  "description": "A unified communication platform for college students, faculty, and administration",
+  "main": "backend/server.js",
+  "scripts": {
+    "start": "cd backend && node start.js",
+    "dev": "concurrently \"cd backend && npm run dev\" \"cd frontend/cec_echo_mobile && flutter run\"",
+    "install-all": "npm install && cd backend && npm install && cd ../frontend/cec_echo_mobile && flutter pub get",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "college",
+    "communication",
+    "platform",
+    "messaging",
+    "real-time",
+    "webRTC"
+  ],
+  "author": "CEC Development Team",
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^8.2.0"
+  }
+}
