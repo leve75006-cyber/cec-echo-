@@ -1,12 +1,38 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 class ApiService {
-  static const String baseUrl =
-      'http://10.0.2.2:5000/api'; // Use 10.0.2.2 for Android emulator to reach localhost
-  static const String wsUrl =
-      'ws://10.0.2.2:5000'; // WebSocket URL for Socket.IO
+  static const String _configuredHost = String.fromEnvironment(
+    'API_BASE_URL',
+    defaultValue: '',
+  );
+
+  static String _normalizeHost(String value) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) return trimmed;
+    return trimmed.replaceFirst(RegExp(r'/+$'), '');
+  }
+
+  static String get _host {
+    if (_configuredHost.trim().isNotEmpty) {
+      return _normalizeHost(_configuredHost);
+    }
+    if (kIsWeb) {
+      return 'http://127.0.0.1:5000';
+    }
+    switch (defaultTargetPlatform) {
+      case TargetPlatform.android:
+        return 'http://10.0.2.2:5000';
+      default:
+        return 'http://127.0.0.1:5000';
+    }
+  }
+
+  static String get baseUrl => '${_normalizeHost(_host)}/api';
+  static String get wsUrl =>
+      _host.replaceFirst('https://', 'wss://').replaceFirst('http://', 'ws://');
 
   // Get JWT token from shared preferences
   static Future<String?> getToken() async {
@@ -58,6 +84,30 @@ class ApiService {
       headers: headers,
     );
     return response;
+  }
+
+  static Future<http.Response> updateMe(Map<String, dynamic> payload) async {
+    final headers = await getAuthHeaders();
+    return http.put(
+      Uri.parse('$baseUrl/auth/me'),
+      headers: headers,
+      body: jsonEncode(payload),
+    );
+  }
+
+  static Future<http.Response> updatePassword({
+    required String currentPassword,
+    required String newPassword,
+  }) async {
+    final headers = await getAuthHeaders();
+    return http.put(
+      Uri.parse('$baseUrl/auth/password'),
+      headers: headers,
+      body: jsonEncode({
+        'currentPassword': currentPassword,
+        'newPassword': newPassword,
+      }),
+    );
   }
 
   // User APIs
@@ -203,6 +253,22 @@ class ApiService {
     return response;
   }
 
+  static Future<http.Response> getStudentProfile() async {
+    final headers = await getAuthHeaders();
+    return http.get(
+      Uri.parse('$baseUrl/student/profile'),
+      headers: headers,
+    );
+  }
+
+  static Future<http.Response> getStudentUsers() async {
+    final headers = await getAuthHeaders();
+    return http.get(
+      Uri.parse('$baseUrl/student/users'),
+      headers: headers,
+    );
+  }
+
   static Future<http.Response> getUnreadMessagesCount() async {
     final headers = await getAuthHeaders();
     final response = await http.get(
@@ -210,6 +276,14 @@ class ApiService {
       headers: headers,
     );
     return response;
+  }
+
+  static Future<http.Response> getStudyMaterials(String courseCode) async {
+    final headers = await getAuthHeaders();
+    return http.get(
+      Uri.parse('$baseUrl/student/study-materials/$courseCode'),
+      headers: headers,
+    );
   }
 
   // Chatbot APIs
@@ -231,5 +305,14 @@ class ApiService {
       body: jsonEncode({'query': query}),
     );
     return response;
+  }
+
+  static Future<http.Response> getExamTopics(String subject) async {
+    final headers = await getAuthHeaders();
+    return http.post(
+      Uri.parse('$baseUrl/chatbot/exam-topics'),
+      headers: headers,
+      body: jsonEncode({'subject': subject}),
+    );
   }
 }

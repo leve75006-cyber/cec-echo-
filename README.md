@@ -16,7 +16,7 @@ CEC ECHO is an intelligent communication platform designed to unify all college 
 ## Tech Stack
 
 - **Backend**: Node.js with Express
-- **Database**: MongoDB
+- **Database**: Supabase (PostgreSQL)
 - **Real-time Communication**: Socket.io
 - **Authentication**: JWT
 - **Frontend**: Flutter (Mobile Application)
@@ -35,7 +35,7 @@ The system is divided into three main modules:
 ### Prerequisites
 
 - Node.js (v14 or higher)
-- MongoDB
+- Supabase project (URL + keys)
 - Flutter SDK
 - Git
 
@@ -55,7 +55,9 @@ npm install
 3. Create a `.env` file in the backend directory with the following content:
 ```env
 PORT=5000
-MONGODB_URI=mongodb://localhost:27017/cec-echo
+SUPABASE_URL=https://your-project-ref.supabase.co
+SUPABASE_ANON_KEY=your-anon-key
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
 JWT_SECRET=cec-echo-jwt-secret-key-change-in-production
 JWT_EXPIRE=7d
 FRONTEND_URL=http://localhost:3000
@@ -155,13 +157,17 @@ The platform supports various types of calls:
 - CORS configured for security
 - Password hashing using bcrypt
 
-## Database Models
+## Database Schema
 
-1. **User Model**: Stores user information including role, department, etc.
-2. **Announcement Model**: Stores announcements with metadata
-3. **Message Model**: Handles direct and group messages
-4. **Group Model**: Manages chat groups
-5. **Call Model**: Tracks WebRTC calls
+Run `backend/supabase-schema.sql` in your Supabase SQL editor before using the backend.
+
+Main tables:
+1. `users`
+2. `announcements`
+3. `messages`
+4. `groups`
+5. `calls`
+6. `study_materials`
 
 ## Real-time Features
 

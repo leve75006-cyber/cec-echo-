@@ -1,220 +1,214 @@
-const User = require('../models/User');
 const jwt = require('jsonwebtoken');
-const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
+const {
+  getUserById,
+  findUserByEmail,
+  findUserByUniqueFields,
+  createUser,
+  updateUser,
+} = require('../utils/supabaseDb');
 
-// Generate JWT Token
-const generateToken = (id) => {
-  return jwt.sign({ id }, process.env.JWT_SECRET, {
+const toPublicUser = (user) => ({
+  id: user._id || user.id,
+  _id: user._id || user.id,
+  username: user.username,
+  email: user.email,
+  firstName: user.firstName,
+  lastName: user.lastName,
+  role: user.role,
+  department: user.department,
+  registrationNumber: user.registrationNumber,
+  isActive: user.isActive,
+  profilePicture: user.profilePicture,
+  createdAt: user.createdAt,
+  updatedAt: user.updatedAt,
+});
+
+const generateToken = (id) =>
+  jwt.sign({ id }, process.env.JWT_SECRET, {
     expiresIn: process.env.JWT_EXPIRE,
   });
-};
 
-// Register User
 exports.register = async (req, res) => {
   try {
     const { username, email, password, firstName, lastName, role, department, registrationNumber } = req.body;
 
-    // Check if user already exists
-    const existingUser = await User.findOne({
-      $or: [{ email }, { username }, { registrationNumber }]
-    });
-
-    if (existingUser) {
+    if (!username || !email || !password || !firstName || !lastName) {
       return res.status(400).json({
         success: false,
-        message: 'User already exists with this email, username or registration number'
+        message: 'Please provide username, firstName, lastName, email and password',
       });
     }
 
-    // Create user
-    const user = await User.create({
-      username,
-      email,
-      password,
-      firstName,
-      lastName,
-      role,
-      department,
-      registrationNumber
+    const duplicate = await findUserByUniqueFields({ email, username, registrationNumber });
+    if (duplicate) {
+      return res.status(400).json({
+        success: false,
+        message: 'User already exists with this email, username or registration number',
+      });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const user = await createUser({
+      username: String(username).trim(),
+      email: String(email).trim().toLowerCase(),
+      password: hashedPassword,
+      firstName: String(firstName).trim(),
+      lastName: String(lastName).trim(),
+      role: role || 'student',
+      department: department ? String(department).trim() : '',
+      registrationNumber: registrationNumber ? String(registrationNumber).trim() : '',
+      isActive: true,
     });
 
-    // Create token
-    const token = generateToken(user._id);
-
-    // Set cookie
+    const token = generateToken(user.id);
     res.cookie('token', token, {
-      expires: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days
+      expires: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production'
+      secure: process.env.NODE_ENV === 'production',
     });
 
-    res.status(201).json({
+    return res.status(201).json({
       success: true,
       token,
-      user: {
-        id: user._id,
-        username: user.username,
-        email: user.email,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        role: user.role,
-        department: user.department,
-        registrationNumber: user.registrationNumber
-      }
+      user: toPublicUser(user),
     });
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: error.message
+      message: error.message,
     });
   }
 };
 
-// Login User
 exports.login = async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    // Check if email and password exist
     if (!email || !password) {
       return res.status(400).json({
         success: false,
-        message: 'Please provide email and password'
+        message: 'Please provide email and password',
       });
     }
 
-    // Check if user exists and password is correct
-    const user = await User.findOne({ email }).select('+password');
-
-    if (!user || !(await user.comparePassword(password))) {
+    const user = await findUserByEmail(String(email).trim().toLowerCase(), true);
+    if (!user || !(await bcrypt.compare(password, user.password || ''))) {
       return res.status(401).json({
         success: false,
-        message: 'Invalid email or password'
+        message: 'Invalid email or password',
       });
     }
 
     if (!user.isActive) {
       return res.status(401).json({
         success: false,
-        message: 'Account is deactivated. Please contact administrator.'
+        message: 'Account is deactivated. Please contact administrator.',
       });
     }
 
-    // Update last login
-    user.lastLogin = Date.now();
-    await user.save({ validateBeforeSave: false });
+    const updatedUser = await updateUser(user.id, { lastLogin: new Date().toISOString() });
+    const token = generateToken(user.id);
 
-    // Create token
-    const token = generateToken(user._id);
-
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       token,
-      user: {
-        id: user._id,
-        username: user.username,
-        email: user.email,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        role: user.role,
-        department: user.department,
-        registrationNumber: user.registrationNumber
-      }
+      user: toPublicUser(updatedUser || user),
     });
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: error.message
+      message: error.message,
     });
   }
 };
 
-// Logout User
 exports.logout = async (req, res) => {
   res.cookie('token', '', {
-    expires: new Date(Date.now() + 10 * 1000), // 10 seconds
-    httpOnly: true
+    expires: new Date(Date.now() + 10 * 1000),
+    httpOnly: true,
   });
 
-  res.status(200).json({
+  return res.status(200).json({
     success: true,
-    message: 'Logged out successfully'
+    message: 'Logged out successfully',
   });
 };
 
-// Get Current User Profile
 exports.getMe = async (req, res) => {
-  const user = await User.findById(req.user.id);
+  try {
+    const user = await getUserById(req.user.id);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found',
+      });
+    }
 
-  res.status(200).json({
-    success: true,
-    user
-  });
+    return res.status(200).json({
+      success: true,
+      user: toPublicUser(user),
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
 };
 
-// Update User Profile
 exports.updateMe = async (req, res) => {
   try {
     const allowedFields = ['firstName', 'lastName', 'email', 'department', 'profilePicture'];
     const updates = {};
-
-    // Filter allowed fields
-    Object.keys(req.body).forEach(field => {
+    for (const field of Object.keys(req.body || {})) {
       if (allowedFields.includes(field)) {
         updates[field] = req.body[field];
       }
-    });
+    }
 
-    const user = await User.findByIdAndUpdate(
-      req.user.id,
-      updates,
-      {
-        new: true,
-        runValidators: true
-      }
-    );
-
-    res.status(200).json({
+    const user = await updateUser(req.user.id, updates);
+    return res.status(200).json({
       success: true,
-      user
+      user: toPublicUser(user),
     });
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: error.message
+      message: error.message,
     });
   }
 };
 
-// Update Password
 exports.updatePassword = async (req, res) => {
   try {
-    // Get user from collection
-    const user = await User.findById(req.user.id).select('+password');
-
-    // Check current password
-    if (!(await user.comparePassword(req.body.currentPassword))) {
-      return res.status(401).json({
+    const user = await getUserById(req.user.id, true);
+    if (!user) {
+      return res.status(404).json({
         success: false,
-        message: 'Current password is incorrect'
+        message: 'User not found',
       });
     }
 
-    // Set new password
-    user.password = req.body.newPassword;
-    await user.save();
+    if (!(await bcrypt.compare(req.body.currentPassword, user.password || ''))) {
+      return res.status(401).json({
+        success: false,
+        message: 'Current password is incorrect',
+      });
+    }
 
-    // Send new token
-    const token = generateToken(user._id);
+    const newPassword = await bcrypt.hash(req.body.newPassword, 10);
+    await updateUser(req.user.id, { password: newPassword }, true);
+    const token = generateToken(req.user.id);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
-      token
+      token,
     });
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: error.message
+      message: error.message,
     });
   }
 };

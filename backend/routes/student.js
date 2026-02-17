@@ -5,7 +5,9 @@ const {
   getStudentProfile,
   getStudentGroups,
   getUnreadMessagesCount,
-  getStudentDashboard
+  getStudentDashboard,
+  getChatUsers,
+  getStudyMaterialsByCourseCode
 } = require('../controllers/studentController');
 const { protect, authorize } = require('../middleware/auth');
 
@@ -26,5 +28,11 @@ router.route('/unread-count')
 
 router.route('/dashboard')
   .get(getStudentDashboard);
+
+router.route('/users')
+  .get(getChatUsers);
+
+router.route('/study-materials/:courseCode')
+  .get(getStudyMaterialsByCourseCode);
 
 module.exports = router;

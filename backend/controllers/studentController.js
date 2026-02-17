@@ -1,221 +1,224 @@
-const Announcement = require('../models/Announcement');
-const User = require('../models/User');
-const { Message, Group } = require('../models/Chat');
-const { protect } = require('../middleware/auth');
+const {
+  listAnnouncements,
+  enrichAnnouncements,
+  listGroups,
+  enrichGroups,
+  listMessages,
+  enrichMessages,
+  listUsers,
+  getUserById,
+  listStudyMaterials,
+} = require('../utils/supabaseDb');
 
-// @desc      Get announcements for student
-// @route     GET /api/student/announcements
-// @access    Private/Student
+const isStudentVisibleAnnouncement = (announcement, userDepartment) => {
+  const audience = announcement.targetAudience || [];
+  if (!announcement.isPublished) return false;
+  if (audience.includes('all') || audience.includes('students')) return true;
+  if (audience.includes('specific-dept') && announcement.department === userDepartment) return true;
+  return false;
+};
+
 exports.getStudentAnnouncements = async (req, res) => {
   try {
-    // Students can see announcements for all, students, or their specific department
-    const query = {
-      $and: [
-        { isPublished: true },
-        {
-          $or: [
-            { targetAudience: { $in: ['all', 'students'] } },
-            { targetAudience: 'specific-dept', department: req.user.department }
-          ]
-        }
-      ]
-    };
+    const announcements = await listAnnouncements();
+    const filtered = announcements.filter((announcement) =>
+      isStudentVisibleAnnouncement(announcement, req.user.department)
+    );
+    const populated = await enrichAnnouncements(filtered);
 
-    const announcements = await Announcement.find(query)
-      .populate('author', 'firstName lastName username role department')
-      .populate('viewers', 'firstName lastName username')
-      .sort({ createdAt: -1 });
-
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
-      count: announcements.length,
-      data: announcements
+      count: populated.length,
+      data: populated,
     });
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: error.message
+      message: error.message,
     });
   }
 };
 
-// @desc      Get student profile with additional info
-// @route     GET /api/student/profile
-// @access    Private/Student
 exports.getStudentProfile = async (req, res) => {
   try {
-    // Get the student's profile with additional information
-    const student = await User.findById(req.user.id)
-      .populate({
-        path: 'sentMessages',
-        select: 'content createdAt messageType',
-        options: { sort: { createdAt: -1 }, limit: 10 }
-      })
-      .populate({
-        path: 'receivedMessages', 
-        select: 'content createdAt messageType',
-        options: { sort: { createdAt: -1 }, limit: 10 }
-      });
+    const [student, announcements, groups, messages] = await Promise.all([
+      getUserById(req.user.id),
+      listAnnouncements(),
+      listGroups(),
+      listMessages(),
+    ]);
 
-    // Get recent announcements viewed by the student
-    const recentAnnouncements = await Announcement.find({
-      viewers: req.user.id
-    })
-    .sort({ createdAt: -1 })
-    .limit(5);
+    const recentAnnouncements = announcements
+      .filter((announcement) => (announcement.viewers || []).includes(req.user.id))
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+      .slice(0, 5);
 
-    // Get student's group memberships
-    const groups = await Group.find({
-      'members.user': req.user.id
-    })
-    .populate('creator', 'firstName lastName username')
-    .populate('members.user', 'firstName lastName username profilePicture');
+    const userGroups = groups.filter((group) =>
+      (group.members || []).some((member) => member.user === req.user.id)
+    );
+    const populatedGroups = await enrichGroups(userGroups);
 
-    res.status(200).json({
+    const recentMessages = await enrichMessages(
+      messages
+        .filter((message) => message.sender === req.user.id || message.receiver === req.user.id)
+        .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+        .slice(0, 10)
+    );
+
+    return res.status(200).json({
       success: true,
       data: {
-        user: student,
+        user: {
+          ...student,
+          sentMessages: recentMessages.filter((message) => message.sender.id === req.user.id),
+          receivedMessages: recentMessages.filter((message) => message.receiver && message.receiver.id === req.user.id),
+        },
         recentAnnouncements,
-        groups
-      }
+        groups: populatedGroups,
+      },
     });
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: error.message
+      message: error.message,
     });
   }
 };
 
-// @desc      Get student's groups
-// @route     GET /api/student/groups
-// @access    Private/Student
 exports.getStudentGroups = async (req, res) => {
   try {
-    const groups = await Group.find({
-      'members.user': req.user.id
-    })
-    .populate('creator', 'firstName lastName username')
-    .populate('members.user', 'firstName lastName username profilePicture')
-    .sort({ createdAt: -1 });
+    const groups = (await listGroups()).filter((group) =>
+      (group.members || []).some((member) => member.user === req.user.id)
+    );
+    const populated = await enrichGroups(groups);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
-      data: groups
+      data: populated,
     });
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: error.message
+      message: error.message,
     });
   }
 };
 
-// @desc      Get student's unread messages count
-// @route     GET /api/student/unread-count
-// @access    Private/Student
 exports.getUnreadMessagesCount = async (req, res) => {
   try {
-    const unreadCount = await Message.countDocuments({
-      receiver: req.user.id,
-      isRead: false
-    });
+    const unreadCount = (await listMessages()).filter(
+      (message) => message.receiver === req.user.id && !message.isRead
+    ).length;
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
-      data: {
-        unreadCount
-      }
+      data: { unreadCount },
     });
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: error.message
+      message: error.message,
     });
   }
 };
 
-// @desc      Get student dashboard
-// @route     GET /api/student/dashboard
-// @access    Private/Student
 exports.getStudentDashboard = async (req, res) => {
   try {
-    // Get counts for different entities relevant to the student
-    const announcementsCount = await Announcement.countDocuments({
-      $and: [
-        { isPublished: true },
-        {
-          $or: [
-            { targetAudience: { $in: ['all', 'students'] } },
-            { targetAudience: 'specific-dept', department: req.user.department }
-          ]
-        }
-      ]
-    });
+    const [announcements, messages, groups] = await Promise.all([
+      listAnnouncements(),
+      listMessages(),
+      listGroups(),
+    ]);
 
-    const unreadMessagesCount = await Message.countDocuments({
-      receiver: req.user.id,
-      isRead: false
-    });
+    const visibleAnnouncements = announcements.filter((announcement) =>
+      isStudentVisibleAnnouncement(announcement, req.user.department)
+    );
+    const unreadMessagesCount = messages.filter(
+      (message) => message.receiver === req.user.id && !message.isRead
+    ).length;
+    const userGroups = groups.filter((group) =>
+      (group.members || []).some((member) => member.user === req.user.id)
+    );
 
-    const groupsCount = await Group.countDocuments({
-      'members.user': req.user.id
-    });
+    const recentAnnouncements = await enrichAnnouncements(
+      visibleAnnouncements
+        .slice()
+        .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+        .slice(0, 5)
+    );
+    const recentMessages = await enrichMessages(
+      messages
+        .filter((message) => message.sender === req.user.id || message.receiver === req.user.id)
+        .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+        .slice(0, 5)
+    );
 
-    // Get recent announcements
-    const recentAnnouncements = await Announcement.find({
-      $and: [
-        { isPublished: true },
-        {
-          $or: [
-            { targetAudience: { $in: ['all', 'students'] } },
-            { targetAudience: 'specific-dept', department: req.user.department }
-          ]
-        }
-      ]
-    })
-    .populate('author', 'firstName lastName username')
-    .sort({ createdAt: -1 })
-    .limit(5);
-
-    // Get recent messages
-    const recentMessages = await Message.find({
-      $or: [
-        { sender: req.user.id },
-        { receiver: req.user.id }
-      ]
-    })
-    .populate('sender', 'firstName lastName username')
-    .populate('receiver', 'firstName lastName username')
-    .sort({ createdAt: -1 })
-    .limit(5);
-
-    // Get student's groups
-    const groups = await Group.find({
-      'members.user': req.user.id
-    })
-    .sort({ createdAt: -1 })
-    .limit(5);
-
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       data: {
         stats: {
-          totalAnnouncements: announcementsCount,
+          totalAnnouncements: visibleAnnouncements.length,
           unreadMessages: unreadMessagesCount,
-          totalGroups: groupsCount
+          totalGroups: userGroups.length,
         },
         recent: {
           announcements: recentAnnouncements,
           messages: recentMessages,
-          groups: groups
-        }
-      }
+          groups: userGroups.slice(0, 5),
+        },
+      },
     });
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: error.message
+      message: error.message,
+    });
+  }
+};
+
+exports.getChatUsers = async (req, res) => {
+  try {
+    const users = (await listUsers(false))
+      .filter((user) => user.id !== req.user.id && user.isActive)
+      .sort((a, b) => `${a.firstName} ${a.lastName}`.localeCompare(`${b.firstName} ${b.lastName}`))
+      .slice(0, 200);
+
+    return res.status(200).json({
+      success: true,
+      count: users.length,
+      data: users,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+exports.getStudyMaterialsByCourseCode = async (req, res) => {
+  try {
+    const courseCode = (req.params.courseCode || '').toUpperCase().trim();
+    if (!courseCode) {
+      return res.status(400).json({
+        success: false,
+        message: 'Course code is required',
+      });
+    }
+
+    const materials = (await listStudyMaterials())
+      .filter((material) => material.courseCode === courseCode && material.isPublished)
+      .slice(0, 100);
+
+    return res.status(200).json({
+      success: true,
+      count: materials.length,
+      data: materials,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
     });
   }
 };

@@ -1,6 +1,12 @@
 const express = require('express');
 const router = express.Router();
-const { getChatbotResponse, getChatbotInfo, getAdvancedChatbotResponse, getOpenAIChatbotResponse } = require('../controllers/chatbotController');
+const {
+  getChatbotResponse,
+  getChatbotInfo,
+  getAdvancedChatbotResponse,
+  getOpenAIChatbotResponse,
+  getExamTopicsResponse,
+} = require('../controllers/chatbotController');
 const { protect } = require('../middleware/auth');
 
 // Public route for chatbot info
@@ -18,5 +24,8 @@ router.route('/advanced-query')
 
 router.route('/openai-query')
   .post(getOpenAIChatbotResponse);
+
+router.route('/exam-topics')
+  .post(getExamTopicsResponse);
 
 module.exports = router;

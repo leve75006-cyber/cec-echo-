@@ -1,172 +1,155 @@
-const { Call } = require('../models/Chat');
-const User = require('../models/User');
-const { emitToUser } = require('./socketHandler');
+const { createCall, updateCall, getCallById, getUserById } = require('./supabaseDb');
 
-// WebRTC configuration
 const webrtcConfig = {
   iceServers: [
     {
-      urls: process.env.STUN_SERVER || 'stun:stun.l.google.com:19302'
+      urls: process.env.STUN_SERVER || 'stun:stun.l.google.com:19302',
     },
-    // TURN server configuration for NAT traversal
     {
       urls: process.env.TURN_SERVER || 'turn:your-turn-server.com:3478',
       username: process.env.TURN_USERNAME || 'your-turn-username',
-      credential: process.env.TURN_CREDENTIALS || 'your-turn-password'
-    }
+      credential: process.env.TURN_CREDENTIALS || 'your-turn-password',
+    },
   ],
-  iceCandidatePoolSize: 10
+  iceCandidatePoolSize: 10,
 };
 
-// Handle WebRTC signaling
 const initializeWebRTC = (io) => {
   io.on('connection', (socket) => {
-    // Handle call initiation
     socket.on('call-user', async (data) => {
       try {
-        const { to, from, callType, offer } = data;
-        
-        // Create call record in database
-        const call = await Call.create({
+        const { to, from, callType, offer, meetingId } = data;
+
+        const caller = await getUserById(from);
+        if (!caller) {
+          socket.emit('call-error', { message: 'Caller not found' });
+          return;
+        }
+        if (!['faculty', 'admin'].includes(caller.role)) {
+          socket.emit('call-error', { message: 'Only faculty can start calls.' });
+          return;
+        }
+
+        const callee = await getUserById(to);
+        if (!callee) {
+          socket.emit('call-error', { message: 'Callee not found' });
+          return;
+        }
+
+        const call = await createCall({
           caller: from,
           callee: to,
           callType: callType || 'audio',
-          status: 'initiated'
+          status: 'initiated',
+          meetingId,
         });
 
-        // Notify the callee about the incoming call
-        socket.to(to.toString()).emit('incoming-call', {
+        socket.emit('call-initiated', {
+          callId: call.id,
+          to,
+          callType,
+          meetingId,
+          calleeInfo: await getUserInfo(to),
+        });
+
+        socket.to(String(to)).emit('incoming-call', {
           from,
-          callId: call._id,
-          callType: callType,
+          callId: call.id,
+          callType,
           offer,
-          callerInfo: await getUserInfo(from)
+          meetingId,
+          callerInfo: await getUserInfo(from),
         });
       } catch (error) {
         socket.emit('call-error', { message: error.message });
       }
     });
 
-    // Handle call acceptance
     socket.on('accept-call', async (data) => {
       try {
         const { callId, to, answer } = data;
-        
-        // Update call status to ongoing
-        const call = await Call.findByIdAndUpdate(
-          callId,
-          { 
-            status: 'ongoing',
-            startTime: Date.now()
-          },
-          { new: true }
-        );
+        await updateCall(callId, { status: 'ongoing', startTime: new Date().toISOString() });
 
-        // Notify the caller that the call is accepted
-        socket.to(to.toString()).emit('call-accepted', {
+        socket.to(String(to)).emit('call-accepted', {
           callId,
-          answer
+          answer,
         });
       } catch (error) {
         socket.emit('call-error', { message: error.message });
       }
     });
 
-    // Handle call rejection
     socket.on('reject-call', async (data) => {
       try {
         const { callId, to } = data;
-        
-        // Update call status to rejected
-        await Call.findByIdAndUpdate(callId, { status: 'rejected' });
-        
-        // Notify the caller that the call is rejected
-        socket.to(to.toString()).emit('call-rejected', { callId });
+        await updateCall(callId, { status: 'rejected', endTime: new Date().toISOString() });
+        socket.to(String(to)).emit('call-rejected', { callId });
       } catch (error) {
         socket.emit('call-error', { message: error.message });
       }
     });
 
-    // Handle call termination
     socket.on('terminate-call', async (data) => {
       try {
         const { callId, to } = data;
-        
-        // Update call status to completed and set end time
-        const call = await Call.findByIdAndUpdate(
-          callId,
-          { 
-            status: 'completed',
-            endTime: Date.now(),
-            $expr: { $add: [{ $ifNull: ['$startTime', Date.now()] }, Date.now()] } // Calculate duration
-          },
-          { new: true }
-        );
-
-        // If call had a start time, calculate duration
-        if (call.startTime) {
-          const duration = Math.floor((Date.now() - call.startTime.getTime()) / 1000);
-          await Call.findByIdAndUpdate(callId, { duration });
+        const call = await getCallById(callId);
+        const endTime = new Date();
+        const updates = {
+          status: 'completed',
+          endTime: endTime.toISOString(),
+        };
+        if (call && call.startTime) {
+          updates.duration = Math.floor((endTime.getTime() - new Date(call.startTime).getTime()) / 1000);
         }
-
-        // Notify the other party that the call is terminated
-        socket.to(to.toString()).emit('call-terminated', { callId });
+        await updateCall(callId, updates);
+        socket.to(String(to)).emit('call-terminated', { callId });
       } catch (error) {
         socket.emit('call-error', { message: error.message });
       }
     });
 
-    // Handle ICE candidate exchange
     socket.on('ice-candidate', (data) => {
       const { to, candidate } = data;
-      socket.to(to.toString()).emit('ice-candidate', {
+      socket.to(String(to)).emit('ice-candidate', {
         candidate,
-        from: socket.id
+        from: socket.id,
       });
     });
 
-    // Handle broadcast calls (like FM broadcast)
     socket.on('initiate-broadcast', async (data) => {
       try {
         const { groupId, from, callType } = data;
-        
-        // Create broadcast call record
-        const call = await Call.create({
+
+        const call = await createCall({
           caller: from,
           groupId,
           callType: callType || 'audio',
-          status: 'ongoing' // Broadcast starts immediately
+          status: 'ongoing',
         });
 
-        // Notify all group members about the broadcast
-        socket.to(groupId.toString()).emit('broadcast-initiated', {
+        socket.to(String(groupId)).emit('broadcast-initiated', {
           from,
-          callId: call._id,
+          callId: call.id,
           callType,
-          callerInfo: await getUserInfo(from)
+          callerInfo: await getUserInfo(from),
         });
       } catch (error) {
         socket.emit('call-error', { message: error.message });
       }
     });
 
-    // Handle raise hand in broadcast
     socket.on('raise-hand', async (data) => {
       try {
         const { callId, userId, groupId } = data;
-        
-        // Notify the broadcaster that someone raised their hand
-        const call = await Call.findById(callId);
+        const call = await getCallById(callId);
         if (call) {
-          socket.to(call.caller.toString()).emit('hand-raised', {
+          socket.to(String(call.caller)).emit('hand-raised', {
             userId,
-            userName: (await getUserInfo(userId)).name
+            userName: (await getUserInfo(userId)).name,
           });
-          
-          // Notify all participants about the hand raise
-          socket.to(groupId.toString()).emit('participant-hand-raised', {
+          socket.to(String(groupId)).emit('participant-hand-raised', {
             userId,
-            userName: (await getUserInfo(userId)).name
+            userName: (await getUserInfo(userId)).name,
           });
         }
       } catch (error) {
@@ -174,49 +157,34 @@ const initializeWebRTC = (io) => {
       }
     });
 
-    // Handle permission to speak in broadcast
     socket.on('grant-speaker-permission', async (data) => {
       try {
         const { callId, userId, groupId } = data;
-        
-        // Notify the participant that they can now speak
-        socket.to(userId.toString()).emit('speaker-permission-granted', { callId });
-        
-        // Notify all participants about the permission change
-        socket.to(groupId.toString()).emit('speaker-added', { userId });
+        socket.to(String(userId)).emit('speaker-permission-granted', { callId });
+        socket.to(String(groupId)).emit('speaker-added', { userId });
       } catch (error) {
         socket.emit('call-error', { message: error.message });
       }
     });
 
-    // Handle revoke speaker permission
     socket.on('revoke-speaker-permission', async (data) => {
       try {
         const { callId, userId, groupId } = data;
-        
-        // Notify the participant that their speaking permission is revoked
-        socket.to(userId.toString()).emit('speaker-permission-revoked', { callId });
-        
-        // Notify all participants about the permission change
-        socket.to(groupId.toString()).emit('speaker-removed', { userId });
+        socket.to(String(userId)).emit('speaker-permission-revoked', { callId });
+        socket.to(String(groupId)).emit('speaker-removed', { userId });
       } catch (error) {
         socket.emit('call-error', { message: error.message });
       }
     });
 
-    // Handle participant leaving broadcast
     socket.on('leave-broadcast', async (data) => {
       try {
         const { callId, userId, groupId } = data;
-        
-        // Notify the broadcaster that a participant left
-        const call = await Call.findById(callId);
+        const call = await getCallById(callId);
         if (call) {
-          socket.to(call.caller.toString()).emit('participant-left', { userId });
+          socket.to(String(call.caller)).emit('participant-left', { userId });
         }
-        
-        // Notify all participants about the departure
-        socket.to(groupId.toString()).emit('participant-left-broadcast', { userId });
+        socket.to(String(groupId)).emit('participant-left-broadcast', { userId });
       } catch (error) {
         socket.emit('call-error', { message: error.message });
       }
@@ -224,15 +192,17 @@ const initializeWebRTC = (io) => {
   });
 };
 
-// Helper function to get user info
 const getUserInfo = async (userId) => {
   try {
-    const user = await User.findById(userId).select('firstName lastName username profilePicture');
+    const user = await getUserById(userId);
+    if (!user) {
+      return { id: userId, name: 'Unknown User' };
+    }
     return {
-      id: user._id,
-      name: `${user.firstName} ${user.lastName}`,
+      id: user.id,
+      name: `${user.firstName} ${user.lastName}`.trim(),
       username: user.username,
-      profilePicture: user.profilePicture
+      profilePicture: user.profilePicture,
     };
   } catch (error) {
     console.error('Error getting user info:', error);
@@ -240,12 +210,9 @@ const getUserInfo = async (userId) => {
   }
 };
 
-// Get WebRTC configuration for client
-const getWebRTCConfig = () => {
-  return webrtcConfig;
-};
+const getWebRTCConfig = () => webrtcConfig;
 
 module.exports = {
   initializeWebRTC,
-  getWebRTCConfig
+  getWebRTCConfig,
 };

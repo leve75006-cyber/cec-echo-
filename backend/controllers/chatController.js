@@ -1,346 +1,303 @@
-const { Message, Group, Call } = require('../models/Chat');
-const User = require('../models/User');
-const { protect } = require('../middleware/auth');
+const {
+  listMessages,
+  createMessage,
+  updateMessages,
+  enrichMessages,
+  listUsers,
+  getUserById,
+  listGroups,
+  createGroup,
+  updateGroup,
+  getGroupById,
+  enrichGroups,
+  createCall,
+  getCallById,
+  updateCall,
+  enrichCalls,
+} = require('../utils/supabaseDb');
 
-// @desc      Get all messages for a user
-// @route     GET /api/chat/messages
-// @access    Private
 exports.getMessages = async (req, res) => {
   try {
-    const messages = await Message.find({
-      $or: [
-        { sender: req.user.id },
-        { receiver: req.user.id },
-        { groupId: { $exists: true } } // Include group messages
-      ]
-    })
-    .populate('sender', 'firstName lastName username profilePicture')
-    .populate('receiver', 'firstName lastName username profilePicture')
-    .populate('groupId', 'name avatar')
-    .sort({ createdAt: -1 })
-    .limit(100); // Limit to last 100 messages
+    const messages = (await listMessages())
+      .filter(
+        (message) =>
+          message.sender === req.user.id ||
+          message.receiver === req.user.id ||
+          Boolean(message.groupId)
+      )
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+      .slice(0, 100);
 
-    res.status(200).json({
+    const populated = await enrichMessages(messages);
+    return res.status(200).json({
       success: true,
-      data: messages
+      data: populated,
     });
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: error.message
+      message: error.message,
     });
   }
 };
 
-// @desc      Get messages between two users
-// @route     GET /api/chat/messages/:userId
-// @access    Private
 exports.getDirectMessages = async (req, res) => {
   try {
-    const messages = await Message.find({
-      $and: [
-        {
-          $or: [
-            { sender: req.user.id, receiver: req.params.userId },
-            { sender: req.params.userId, receiver: req.user.id }
-          ]
-        },
-        { isDeleted: false }
-      ]
-    })
-    .populate('sender', 'firstName lastName username profilePicture')
-    .populate('receiver', 'firstName lastName username profilePicture')
-    .sort({ createdAt: -1 });
+    const otherUserId = req.params.userId;
+    const messages = (await listMessages())
+      .filter(
+        (message) =>
+          !message.isDeleted &&
+          ((message.sender === req.user.id && message.receiver === otherUserId) ||
+            (message.sender === otherUserId && message.receiver === req.user.id))
+      )
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
-    // Mark messages as read if sent to current user
-    await Message.updateMany(
+    await updateMessages(
       {
         receiver: req.user.id,
-        sender: req.params.userId,
-        isRead: false
+        sender: otherUserId,
+        isRead: false,
       },
-      { isRead: true }
+      { is_read: true }
     );
 
-    res.status(200).json({
+    const populated = await enrichMessages(messages);
+    return res.status(200).json({
       success: true,
-      data: messages
+      data: populated,
     });
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: error.message
+      message: error.message,
     });
   }
 };
 
-// @desc      Send a message
-// @route     POST /api/chat/messages
-// @access    Private
 exports.sendMessage = async (req, res) => {
   try {
     const { receiver, content, messageType, groupId } = req.body;
 
-    // Validate if it's a group or direct message
     if (!receiver && !groupId) {
       return res.status(400).json({
         success: false,
-        message: 'Either receiver or groupId is required'
+        message: 'Either receiver or groupId is required',
       });
     }
-
     if (receiver && groupId) {
       return res.status(400).json({
         success: false,
-        message: 'Cannot send message to both user and group at the same time'
+        message: 'Cannot send message to both user and group at the same time',
       });
     }
 
-    // For direct messages, validate receiver exists
     if (receiver) {
-      const receiverExists = await User.findById(receiver);
+      const receiverExists = await getUserById(receiver);
       if (!receiverExists) {
         return res.status(404).json({
           success: false,
-          message: 'Receiver not found'
+          message: 'Receiver not found',
         });
       }
     }
 
-    const message = await Message.create({
+    const message = await createMessage({
       sender: req.user.id,
       receiver,
       content,
       messageType,
-      groupId
+      groupId,
     });
 
-    // Populate sender for response
-    await message.populate('sender', 'firstName lastName username profilePicture');
-
-    res.status(201).json({
+    const populated = await enrichMessages([message]);
+    return res.status(201).json({
       success: true,
-      data: message
+      data: populated[0],
     });
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: error.message
+      message: error.message,
     });
   }
 };
 
-// @desc      Create a group
-// @route     POST /api/chat/groups
-// @access    Private
 exports.createGroup = async (req, res) => {
   try {
     const { name, description, members, isPrivate } = req.body;
 
-    // Validate members exist
     if (members && members.length > 0) {
-      const existingMembers = await User.find({ _id: { $in: members } });
-      if (existingMembers.length !== members.length) {
+      const allUsers = await listUsers(false);
+      const existingMemberIds = new Set(allUsers.map((user) => user.id));
+      const missing = members.find((memberId) => !existingMemberIds.has(memberId));
+      if (missing) {
         return res.status(404).json({
           success: false,
-          message: 'Some members not found'
+          message: 'Some members not found',
         });
       }
     }
 
-    const group = await Group.create({
+    const memberList = [
+      {
+        user: req.user.id,
+        role: 'admin',
+        joinedAt: new Date().toISOString(),
+      },
+      ...((members || []).filter((memberId) => memberId !== req.user.id).map((memberId) => ({
+        user: memberId,
+        role: 'member',
+        joinedAt: new Date().toISOString(),
+      }))),
+    ];
+
+    const group = await createGroup({
       name,
       description,
       creator: req.user.id,
-      members: members ? members.map(memberId => ({ user: memberId })) : [],
+      members: memberList,
       admins: [req.user.id],
-      isPrivate
+      isPrivate,
     });
 
-    // Add the creator as an admin member
-    group.members.unshift({
-      user: req.user.id,
-      role: 'admin',
-      joinedAt: new Date()
-    });
-    await group.save();
-
-    res.status(201).json({
+    return res.status(201).json({
       success: true,
-      data: group
+      data: group,
     });
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: error.message
+      message: error.message,
     });
   }
 };
 
-// @desc      Get all groups for a user
-// @route     GET /api/chat/groups
-// @access    Private
 exports.getGroups = async (req, res) => {
   try {
-    // Get groups where user is a member
-    const groups = await Group.find({
-      'members.user': req.user.id
-    })
-    .populate('creator', 'firstName lastName username')
-    .populate('members.user', 'firstName lastName username profilePicture')
-    .sort({ createdAt: -1 });
+    const groups = (await listGroups()).filter((group) =>
+      (group.members || []).some((member) => member.user === req.user.id)
+    );
+    const populated = await enrichGroups(groups);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
-      data: groups
+      data: populated,
     });
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: error.message
+      message: error.message,
     });
   }
 };
 
-// @desc      Get group by ID
-// @route     GET /api/chat/groups/:id
-// @access    Private
 exports.getGroup = async (req, res) => {
   try {
-    const group = await Group.findOne({
-      _id: req.params.id,
-      'members.user': req.user.id // Ensure user is a member of the group
-    })
-    .populate('creator', 'firstName lastName username')
-    .populate('members.user', 'firstName lastName username profilePicture')
-    .populate({
-      path: 'members.user',
-      select: 'firstName lastName username profilePicture'
-    });
-
-    if (!group) {
+    const group = await getGroupById(req.params.id);
+    if (!group || !(group.members || []).some((member) => member.user === req.user.id)) {
       return res.status(404).json({
         success: false,
-        message: 'Group not found or you are not a member'
+        message: 'Group not found or you are not a member',
       });
     }
 
-    res.status(200).json({
+    const populated = await enrichGroups([group]);
+    return res.status(200).json({
       success: true,
-      data: group
+      data: populated[0],
     });
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: error.message
+      message: error.message,
     });
   }
 };
 
-// @desc      Add member to group
-// @route     PUT /api/chat/groups/add-member/:id
-// @access    Private
 exports.addMemberToGroup = async (req, res) => {
   try {
     const { userId, role } = req.body;
+    const group = await getGroupById(req.params.id);
 
-    const group = await Group.findOne({
-      _id: req.params.id,
-      admins: req.user.id // Ensure user is an admin
-    });
-
-    if (!group) {
+    if (!group || !(group.admins || []).includes(req.user.id)) {
       return res.status(404).json({
         success: false,
-        message: 'Group not found or you are not an admin'
+        message: 'Group not found or you are not an admin',
       });
     }
 
-    // Check if user exists
-    const userToAdd = await User.findById(userId);
+    const userToAdd = await getUserById(userId);
     if (!userToAdd) {
       return res.status(404).json({
         success: false,
-        message: 'User not found'
+        message: 'User not found',
       });
     }
 
-    // Check if user is already in the group
-    const isAlreadyMember = group.members.some(member => member.user.toString() === userId);
-    if (isAlreadyMember) {
+    if ((group.members || []).some((member) => member.user === userId)) {
       return res.status(400).json({
         success: false,
-        message: 'User is already a member of this group'
+        message: 'User is already a member of this group',
       });
     }
 
-    // Add member to group
-    group.members.push({
-      user: userId,
-      role: role || 'member'
-    });
+    const members = [
+      ...(group.members || []),
+      {
+        user: userId,
+        role: role || 'member',
+        joinedAt: new Date().toISOString(),
+      },
+    ];
 
-    await group.save();
-
-    res.status(200).json({
+    const updated = await updateGroup(group.id, { members });
+    return res.status(200).json({
       success: true,
-      data: group
+      data: updated,
     });
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: error.message
+      message: error.message,
     });
   }
 };
 
-// @desc      Initiate a call
-// @route     POST /api/chat/calls
-// @access    Private
 exports.initiateCall = async (req, res) => {
   try {
     const { callee, groupId, callType } = req.body;
 
-    // Validate callee exists if it's a direct call
     if (callee) {
-      const calleeExists = await User.findById(callee);
+      const calleeExists = await getUserById(callee);
       if (!calleeExists) {
         return res.status(404).json({
           success: false,
-          message: 'Callee not found'
+          message: 'Callee not found',
         });
       }
     }
 
-    const call = await Call.create({
+    const call = await createCall({
       caller: req.user.id,
       callee,
       groupId,
-      callType: callType || 'audio'
+      callType: callType || 'audio',
     });
 
-    // Populate user data for response
-    await call.populate([
-      { path: 'caller', select: 'firstName lastName username profilePicture' },
-      { path: 'callee', select: 'firstName lastName username profilePicture' },
-      { path: 'groupId', select: 'name' }
-    ]);
-
-    res.status(201).json({
+    const populated = await enrichCalls([call]);
+    return res.status(201).json({
       success: true,
-      data: call
+      data: populated[0],
     });
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: error.message
+      message: error.message,
     });
   }
 };
 
-// @desc      Update call status
-// @route     PUT /api/chat/calls/:id
-// @access    Private
 exports.updateCallStatus = async (req, res) => {
   try {
     const { status } = req.body;
@@ -349,49 +306,45 @@ exports.updateCallStatus = async (req, res) => {
     if (!validStatuses.includes(status)) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid call status'
+        message: 'Invalid call status',
       });
     }
 
-    const call = await Call.findById(req.params.id);
-
+    const call = await getCallById(req.params.id);
     if (!call) {
       return res.status(404).json({
         success: false,
-        message: 'Call not found'
+        message: 'Call not found',
       });
     }
 
-    // Check authorization - either caller or callee can update
-    if (call.caller.toString() !== req.user.id && call.callee.toString() !== req.user.id) {
+    if (call.caller !== req.user.id && call.callee !== req.user.id) {
       return res.status(403).json({
         success: false,
-        message: 'Not authorized to update this call'
+        message: 'Not authorized to update this call',
       });
     }
 
-    call.status = status;
-
-    // Set start/end times based on status
+    const updates = { status };
     if (status === 'ongoing' && !call.startTime) {
-      call.startTime = Date.now();
+      updates.startTime = new Date().toISOString();
     } else if (['completed', 'missed', 'rejected'].includes(status) && !call.endTime) {
-      call.endTime = Date.now();
+      const endTime = new Date();
+      updates.endTime = endTime.toISOString();
       if (call.startTime) {
-        call.duration = Math.floor((call.endTime - call.startTime) / 1000); // Duration in seconds
+        updates.duration = Math.floor((endTime.getTime() - new Date(call.startTime).getTime()) / 1000);
       }
     }
 
-    await call.save();
-
-    res.status(200).json({
+    const updated = await updateCall(req.params.id, updates);
+    return res.status(200).json({
       success: true,
-      data: call
+      data: updated,
     });
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: error.message
+      message: error.message,
     });
   }
 };

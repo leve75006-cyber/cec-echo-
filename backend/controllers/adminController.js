@@ -1,226 +1,200 @@
-const User = require('../models/User');
-const Announcement = require('../models/Announcement');
-const { Message, Group, Call } = require('../models/Chat');
-const { protect, authorize } = require('../middleware/auth');
+const {
+  listUsers,
+  listAnnouncements,
+  listMessages,
+  listGroups,
+  listCalls,
+  enrichAnnouncements,
+  enrichMessages,
+  updateUser,
+} = require('../utils/supabaseDb');
 
-// @desc      Get admin dashboard stats
-// @route     GET /api/admin/dashboard
-// @access    Private/Admin
 exports.getDashboardStats = async (req, res) => {
   try {
-    // Get counts for different entities
-    const userCount = await User.countDocuments();
-    const announcementCount = await Announcement.countDocuments();
-    const activeUsers = await User.countDocuments({ isActive: true });
-    const groupCount = await Group.countDocuments();
-    const messageCount = await Message.countDocuments();
-    const callCount = await Call.countDocuments();
-    
-    // Get recent activities
-    const recentUsers = await User.find()
-      .sort({ createdAt: -1 })
-      .limit(5)
-      .select('firstName lastName username email role createdAt');
-      
-    const recentAnnouncements = await Announcement.find()
-      .populate('author', 'firstName lastName username')
-      .sort({ createdAt: -1 })
-      .limit(5);
-      
-    const recentMessages = await Message.find()
-      .populate('sender', 'firstName lastName username')
-      .populate('receiver', 'firstName lastName username')
-      .sort({ createdAt: -1 })
-      .limit(5);
+    const [users, announcements, messages, groups, calls] = await Promise.all([
+      listUsers(false),
+      listAnnouncements(),
+      listMessages(),
+      listGroups(),
+      listCalls(),
+    ]);
 
-    res.status(200).json({
+    const recentUsers = users
+      .slice()
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+      .slice(0, 5)
+      .map((user) => ({
+        _id: user.id,
+        id: user.id,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        username: user.username,
+        email: user.email,
+        role: user.role,
+        createdAt: user.createdAt,
+      }));
+
+    const recentAnnouncements = await enrichAnnouncements(
+      announcements
+        .slice()
+        .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+        .slice(0, 5)
+    );
+    const recentMessages = await enrichMessages(
+      messages
+        .slice()
+        .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+        .slice(0, 5)
+    );
+
+    return res.status(200).json({
       success: true,
       data: {
         stats: {
-          totalUsers: userCount,
-          activeUsers: activeUsers,
-          totalAnnouncements: announcementCount,
-          totalGroups: groupCount,
-          totalMessages: messageCount,
-          totalCalls: callCount
+          totalUsers: users.length,
+          activeUsers: users.filter((user) => user.isActive).length,
+          totalAnnouncements: announcements.length,
+          totalGroups: groups.length,
+          totalMessages: messages.length,
+          totalCalls: calls.length,
         },
         recentActivities: {
           recentUsers,
           recentAnnouncements,
-          recentMessages
-        }
-      }
+          recentMessages,
+        },
+      },
     });
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: error.message
+      message: error.message,
     });
   }
 };
 
-// @desc      Get all users with pagination
-// @route     GET /api/admin/users
-// @access    Private/Admin
 exports.getAllUsers = async (req, res) => {
   try {
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 10;
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = parseInt(req.query.limit, 10) || 10;
     const skip = (page - 1) * limit;
-    
-    // Build query
-    let query = {};
-    
-    // Add search capability
-    if (req.query.search) {
-      const searchRegex = new RegExp(req.query.search, 'i');
-      query.$or = [
-        { firstName: searchRegex },
-        { lastName: searchRegex },
-        { username: searchRegex },
-        { email: searchRegex }
-      ];
+    const search = (req.query.search || '').toLowerCase().trim();
+
+    let users = await listUsers(false);
+    if (search) {
+      users = users.filter((user) => {
+        const haystack = [user.firstName, user.lastName, user.username, user.email].join(' ').toLowerCase();
+        return haystack.includes(search);
+      });
     }
-    
-    // Add role filter
     if (req.query.role) {
-      query.role = req.query.role;
+      users = users.filter((user) => user.role === req.query.role);
     }
-    
-    // Add status filter
     if (req.query.status) {
-      query.isActive = req.query.status === 'active';
+      const shouldBeActive = req.query.status === 'active';
+      users = users.filter((user) => user.isActive === shouldBeActive);
     }
-    
-    const users = await User.find(query)
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit);
-    
-    const total = await User.countDocuments(query);
-    
-    res.status(200).json({
+
+    const total = users.length;
+    const pagedUsers = users.slice(skip, skip + limit);
+    return res.status(200).json({
       success: true,
       data: {
-        users,
+        users: pagedUsers,
         pagination: {
           currentPage: page,
           totalPages: Math.ceil(total / limit),
           totalUsers: total,
           hasNext: page < Math.ceil(total / limit),
-          hasPrev: page > 1
-        }
-      }
+          hasPrev: page > 1,
+        },
+      },
     });
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: error.message
+      message: error.message,
     });
   }
 };
 
-// @desc      Get all announcements with filters
-// @route     GET /api/admin/announcements
-// @access    Private/Admin
 exports.getAllAnnouncements = async (req, res) => {
   try {
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 10;
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = parseInt(req.query.limit, 10) || 10;
     const skip = (page - 1) * limit;
-    
-    // Build query
-    let query = {};
-    
-    // Add search capability
-    if (req.query.search) {
-      const searchRegex = new RegExp(req.query.search, 'i');
-      query.$or = [
-        { title: searchRegex },
-        { content: searchRegex }
-      ];
+    const search = (req.query.search || '').toLowerCase().trim();
+
+    let announcements = await listAnnouncements();
+    if (search) {
+      announcements = announcements.filter((announcement) =>
+        `${announcement.title} ${announcement.content}`.toLowerCase().includes(search)
+      );
     }
-    
-    // Add category filter
     if (req.query.category) {
-      query.category = req.query.category;
+      announcements = announcements.filter((announcement) => announcement.category === req.query.category);
     }
-    
-    // Add priority filter
     if (req.query.priority) {
-      query.priority = req.query.priority;
+      announcements = announcements.filter((announcement) => announcement.priority === req.query.priority);
     }
-    
-    // Add publication status filter
     if (req.query.status) {
-      query.isPublished = req.query.status === 'published';
+      const shouldBePublished = req.query.status === 'published';
+      announcements = announcements.filter((announcement) => announcement.isPublished === shouldBePublished);
     }
-    
-    const announcements = await Announcement.find(query)
-      .populate('author', 'firstName lastName username role')
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit);
-    
-    const total = await Announcement.countDocuments(query);
-    
-    res.status(200).json({
+
+    const total = announcements.length;
+    const paged = announcements.slice(skip, skip + limit);
+    const populated = await enrichAnnouncements(paged);
+
+    return res.status(200).json({
       success: true,
       data: {
-        announcements,
+        announcements: populated,
         pagination: {
           currentPage: page,
           totalPages: Math.ceil(total / limit),
           totalAnnouncements: total,
           hasNext: page < Math.ceil(total / limit),
-          hasPrev: page > 1
-        }
-      }
+          hasPrev: page > 1,
+        },
+      },
     });
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: error.message
+      message: error.message,
     });
   }
 };
 
-// @desc      Update user role
-// @route     PUT /api/admin/users/role/:id
-// @access    Private/Admin
 exports.updateUserRole = async (req, res) => {
   try {
     const { role } = req.body;
     const validRoles = ['student', 'faculty', 'admin'];
-    
+
     if (!validRoles.includes(role)) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid role specified'
+        message: 'Invalid role specified',
       });
     }
-    
-    const user = await User.findByIdAndUpdate(
-      req.params.id,
-      { role },
-      { new: true, runValidators: true }
-    ).select('-password');
-    
+
+    const user = await updateUser(req.params.id, { role });
     if (!user) {
       return res.status(404).json({
         success: false,
-        message: 'User not found'
+        message: 'User not found',
       });
     }
-    
-    res.status(200).json({
+
+    return res.status(200).json({
       success: true,
-      data: user
+      data: user,
     });
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: error.message
+      message: error.message,
     });
   }
 };

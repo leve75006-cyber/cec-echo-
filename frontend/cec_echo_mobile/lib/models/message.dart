@@ -1,5 +1,23 @@
 import 'package:cec_echo_mobile/models/user.dart';
 
+User? _userFromDynamic(dynamic value) {
+  if (value is Map<String, dynamic>) {
+    return User.fromJson(value);
+  }
+  if (value is String) {
+    return User(
+      id: value,
+      username: 'user',
+      email: '',
+      firstName: 'User',
+      lastName: '',
+      role: 'student',
+      isActive: true,
+    );
+  }
+  return null;
+}
+
 class Message {
   final String id;
   final User? sender;
@@ -32,11 +50,12 @@ class Message {
   });
 
   factory Message.fromJson(Map<String, dynamic> json) {
+    final group = json['groupId'];
     return Message(
       id: json['_id'] ?? json['id'],
-      sender: json['sender'] != null ? User.fromJson(json['sender']) : null,
-      receiver: json['receiver'] != null ? User.fromJson(json['receiver']) : null,
-      groupId: json['groupId'],
+      sender: _userFromDynamic(json['sender']),
+      receiver: _userFromDynamic(json['receiver']),
+      groupId: group is Map<String, dynamic> ? (group['_id'] ?? group['id'])?.toString() : group?.toString(),
       content: json['content'],
       messageType: json['messageType'] ?? 'text',
       fileUrl: json['fileUrl'],
@@ -72,15 +91,26 @@ class Group {
   });
 
   factory Group.fromJson(Map<String, dynamic> json) {
+    final creatorRaw = json['creator'];
     return Group(
       id: json['_id'] ?? json['id'],
       name: json['name'],
       description: json['description'],
-      creator: User.fromJson(json['creator']),
+      creator: creatorRaw is Map<String, dynamic>
+          ? User.fromJson(creatorRaw)
+          : User(
+              id: creatorRaw?.toString() ?? '',
+              username: 'creator',
+              email: '',
+              firstName: 'Creator',
+              lastName: '',
+              role: 'student',
+              isActive: true,
+            ),
       members: json['members'] != null
           ? List<GroupMember>.from(json['members'].map((member) => GroupMember.fromJson(member)))
           : [],
-      admins: List<String>.from(json['admins']),
+      admins: List<String>.from(json['admins'] ?? []),
       isPrivate: json['isPrivate'] ?? false,
       avatar: json['avatar'],
     );
@@ -99,10 +129,21 @@ class GroupMember {
   });
 
   factory GroupMember.fromJson(Map<String, dynamic> json) {
+    final userRaw = json['user'];
     return GroupMember(
-      user: User.fromJson(json['user']),
+      user: userRaw is Map<String, dynamic>
+          ? User.fromJson(userRaw)
+          : User(
+              id: userRaw?.toString() ?? '',
+              username: 'member',
+              email: '',
+              firstName: 'Member',
+              lastName: '',
+              role: 'student',
+              isActive: true,
+            ),
       role: json['role'] ?? 'member',
-      joinedAt: DateTime.parse(json['joinedAt']),
+      joinedAt: DateTime.tryParse((json['joinedAt'] ?? '').toString()) ?? DateTime.now(),
     );
   }
 }

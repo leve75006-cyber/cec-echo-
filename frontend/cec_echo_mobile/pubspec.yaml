@@ -46,9 +46,6 @@ dependencies:
   # Socket.IO client for real-time communication
   socket_io_client: ^2.0.1
 
-  # WebRTC for audio/video calls
-  flutter_webrtc: ^0.9.41
-
   # Date/time formatting
   intl: ^0.18.1
 
@@ -62,6 +59,7 @@ dependencies:
 dev_dependencies:
   flutter_test:
     sdk: flutter
+  flutter_native_splash: ^2.4.6
 
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is
@@ -111,3 +109,10 @@ flutter:
   #
   # For details regarding fonts from package dependencies,
   # see https://flutter.dev/to/font-from-package
+
+flutter_native_splash:
+  color: "#0B4F6C"
+  image: assets/splash/logo.png
+  android_12:
+    color: "#0B4F6C"
+    image: assets/splash/logo.png

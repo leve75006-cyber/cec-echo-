@@ -1,6 +1,3 @@
-const { Message } = require('../models/Chat');
-const User = require('../models/User');
-const { protect } = require('../middleware/auth');
 const OpenAI = require('openai');
 
 const openai = new OpenAI({
@@ -330,6 +327,58 @@ exports.getChatbotInfo = async (req, res) => {
     res.status(500).json({
       success: false,
       message: error.message
+    });
+  }
+};
+
+// @desc      Get important exam topics by subject using OpenAI
+// @route     POST /api/chatbot/exam-topics
+// @access    Private
+exports.getExamTopicsResponse = async (req, res) => {
+  try {
+    const { subject, query } = req.body;
+    const topic = (subject || query || '').toString().trim();
+
+    if (!topic) {
+      return res.status(400).json({
+        success: false,
+        message: 'Subject is required',
+      });
+    }
+
+    const completion = await openai.chat.completions.create({
+      model: 'openai/gpt-3.5-turbo',
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are an exam preparation assistant. For a given subject, return the most important exam topics in a concise, practical format. Include: 1) Top 12 high-priority topics, 2) 5 likely question patterns, 3) 7-day revision plan. Keep it clear and structured.',
+        },
+        {
+          role: 'user',
+          content: `Subject: ${topic}\nTask: Give me important exam topics and a focused revision strategy.`,
+        },
+      ],
+      max_tokens: 700,
+      temperature: 0.4,
+    });
+
+    const response = completion.choices[0]?.message?.content?.trim() || '';
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        subject: topic,
+        response,
+        timestamp: new Date(),
+        type: 'exam-topics',
+      },
+    });
+  } catch (error) {
+    console.error('Exam Topics OpenAI API Error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to generate exam topics. Please try again.',
     });
   }
 };
