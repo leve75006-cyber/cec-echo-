@@ -1,4 +1,9 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 
 import '../../models/announcement.dart';
@@ -9,6 +14,35 @@ import '../../models/user.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/home_provider.dart';
 import '../../providers/theme_provider.dart';
+import '../../services/api_service.dart';
+
+Uint8List? _decodeDataUriBytesGlobal(String dataUri) {
+  final index = dataUri.indexOf(',');
+  if (index == -1) {
+    return null;
+  }
+  final payload = dataUri.substring(index + 1);
+  try {
+    return base64Decode(payload);
+  } catch (_) {
+    return null;
+  }
+}
+
+ImageProvider<Object>? _profileImageProvider(String? profilePicture) {
+  final raw = (profilePicture ?? '').trim();
+  if (raw.isEmpty) {
+    return null;
+  }
+  if (raw.startsWith('data:image/')) {
+    final bytes = _decodeDataUriBytesGlobal(raw);
+    if (bytes != null) {
+      return MemoryImage(bytes);
+    }
+    return null;
+  }
+  return NetworkImage(raw);
+}
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -20,6 +54,7 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   int _selectedIndex = 0;
   bool _bootstrapped = false;
+  final ImagePicker _imagePicker = ImagePicker();
 
   @override
   void didChangeDependencies() {
@@ -57,17 +92,30 @@ class _HomeScreenState extends State<HomeScreen> {
         announcements: homeProvider.announcements,
         onRefresh: homeProvider.refreshAnnouncements,
         onOpen: _openAnnouncement,
+        onEnterBroadcasts: _openBroadcasts,
+        canPostCircular: _canPostCircular(user?.role),
+        onPostCircular: () => _openPostCircularDialog(defaultCategory: 'general'),
+      ),
+      InternshipPlacementPage(
+        announcements: homeProvider.announcements,
+        onRefresh: homeProvider.refreshAnnouncements,
+        onOpen: _openAnnouncement,
+        canPostCircular: _canPostCircular(user?.role),
+        onPostCircular: () => _openPostCircularDialog(defaultCategory: 'internship'),
       ),
       ChatPage(
         currentUser: user,
         contacts: homeProvider.contacts,
+        groups: homeProvider.groups,
         allUsers: homeProvider.allUsers,
         messages: homeProvider.messages,
         incomingCalls: homeProvider.incomingCalls,
         outgoingCalls: homeProvider.outgoingCalls,
-        onRefresh: homeProvider.refreshMessages,
+        onRefresh: homeProvider.refreshAll,
         onOpenChat: _openChat,
         onStartChat: _openStartChatPicker,
+        onCreateGroup: _openCreateGroupDialog,
+        onOpenGroupChat: _openGroupChat,
         onStartMeeting: _openMeetingInviteDialog,
         onAcceptCall: homeProvider.acceptCall,
         onRejectCall: homeProvider.rejectCall,
@@ -78,6 +126,7 @@ class _HomeScreenState extends State<HomeScreen> {
         onEditPhoto: _openEditPhotoDialog,
         onPrivacy: _openChangePasswordDialog,
         onHelp: _openHelpSupportDialog,
+        onUploadNotes: _openUploadNotesDialog,
       ),
     ];
 
@@ -144,17 +193,33 @@ class _HomeScreenState extends State<HomeScreen> {
         onDestinationSelected: (index) => setState(() => _selectedIndex = index),
         destinations: const [
           NavigationDestination(icon: Icon(Icons.grid_view_rounded), label: 'Dashboard'),
-          NavigationDestination(icon: Icon(Icons.campaign_outlined), label: 'News'),
+          NavigationDestination(icon: Icon(Icons.campaign_outlined), label: 'Announcements'),
+          NavigationDestination(icon: Icon(Icons.work_outline_rounded), label: 'Internships'),
           NavigationDestination(icon: Icon(Icons.chat_bubble_outline_rounded), label: 'Chats'),
           NavigationDestination(icon: Icon(Icons.person_outline_rounded), label: 'Profile'),
         ],
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _openExamTopicsChatbot,
-        icon: const Icon(Icons.support_agent_rounded),
-        label: const Text('Exam Bot'),
+      floatingActionButton: user?.role == 'faculty'
+          ? null
+          : FloatingActionButton.extended(
+              onPressed: _openExamTopicsChatbot,
+              icon: const Icon(Icons.support_agent_rounded),
+              label: const Text('Exam Bot'),
+            ),
+    );
+  }
+
+  void _openBroadcasts() {
+    setState(() => _selectedIndex = 3);
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Open Meeting Invites in Chats to join faculty broadcasts.'),
       ),
     );
+  }
+
+  bool _canPostCircular(String? role) {
+    return role == 'admin' || role == 'faculty';
   }
 
   void _onQuickAction(int index) {
@@ -163,15 +228,11 @@ class _HomeScreenState extends State<HomeScreen> {
       return;
     }
     if (index == 1) {
-      setState(() => _selectedIndex = 2);
+      setState(() => _selectedIndex = 3);
       return;
     }
     if (index == 2) {
       setState(() => _selectedIndex = 2);
-      final groups = context.read<HomeProvider>().dashboardStats['totalGroups'] ?? 0;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Loaded chats with $groups active groups.')),
-      );
       return;
     }
     _openStudyMaterialsDialog();
@@ -246,6 +307,10 @@ class _HomeScreenState extends State<HomeScreen> {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Text(refreshed.content),
+                    if ((refreshed.attachments ?? []).isNotEmpty) ...[
+                      const SizedBox(height: 12),
+                      ..._buildAnnouncementAttachmentTiles(refreshed.attachments ?? const []),
+                    ],
                     const SizedBox(height: 12),
                     Text('Likes: ${refreshed.likes.length} | Comments: ${refreshed.comments.length}'),
                     const SizedBox(height: 12),
@@ -282,6 +347,265 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  Future<void> _openPostCircularDialog({
+    required String defaultCategory,
+  }) async {
+    final home = context.read<HomeProvider>();
+    final titleController = TextEditingController();
+    final contentController = TextEditingController();
+    final attachments = <Map<String, String>>[];
+    var category = defaultCategory;
+    var priority = 'medium';
+    var pickType = 'image';
+
+    await showDialog<void>(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setStateDialog) {
+            Future<void> addAttachment() async {
+              final picked = await _pickMediaByType(pickType);
+              if (picked == null) {
+                return;
+              }
+              setStateDialog(() {
+                attachments.add({
+                  'type': pickType,
+                  'name': picked.$2,
+                  'dataUrl': picked.$1,
+                });
+              });
+            }
+
+            Future<void> submit() async {
+              final ok = await home.createAnnouncementCircular(
+                title: titleController.text,
+                content: contentController.text,
+                category: category,
+                priority: priority,
+                attachments: attachments,
+              );
+              if (!mounted) {
+                return;
+              }
+              final messenger = ScaffoldMessenger.of(this.context);
+              if (!ok) {
+                messenger.showSnackBar(
+                  SnackBar(content: Text(home.error ?? 'Unable to post circular')),
+                );
+                return;
+              }
+              if (context.mounted) {
+                Navigator.pop(context);
+              }
+              messenger.showSnackBar(
+                const SnackBar(content: Text('Circular posted successfully')),
+              );
+            }
+
+            return AlertDialog(
+              title: const Text('Post Circular'),
+              content: SizedBox(
+                width: 520,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      TextField(
+                        controller: titleController,
+                        decoration: const InputDecoration(labelText: 'Title'),
+                      ),
+                      const SizedBox(height: 10),
+                      TextField(
+                        controller: contentController,
+                        minLines: 3,
+                        maxLines: 5,
+                        decoration: const InputDecoration(labelText: 'Content'),
+                      ),
+                      const SizedBox(height: 10),
+                      DropdownButtonFormField<String>(
+                        initialValue: category,
+                        decoration: const InputDecoration(labelText: 'Category'),
+                        items: const [
+                          DropdownMenuItem(value: 'general', child: Text('General')),
+                          DropdownMenuItem(value: 'internship', child: Text('Internship')),
+                          DropdownMenuItem(value: 'placement', child: Text('Placement')),
+                          DropdownMenuItem(value: 'academic', child: Text('Academic')),
+                          DropdownMenuItem(value: 'event', child: Text('Event')),
+                        ],
+                        onChanged: (value) {
+                          if (value == null) {
+                            return;
+                          }
+                          setStateDialog(() => category = value);
+                        },
+                      ),
+                      const SizedBox(height: 10),
+                      DropdownButtonFormField<String>(
+                        initialValue: priority,
+                        decoration: const InputDecoration(labelText: 'Priority'),
+                        items: const [
+                          DropdownMenuItem(value: 'low', child: Text('Low')),
+                          DropdownMenuItem(value: 'medium', child: Text('Medium')),
+                          DropdownMenuItem(value: 'high', child: Text('High')),
+                          DropdownMenuItem(value: 'urgent', child: Text('Urgent')),
+                        ],
+                        onChanged: (value) {
+                          if (value == null) {
+                            return;
+                          }
+                          setStateDialog(() => priority = value);
+                        },
+                      ),
+                      const SizedBox(height: 12),
+                      const Text('Attachments'),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 8,
+                        children: [
+                          ChoiceChip(
+                            label: const Text('Image'),
+                            selected: pickType == 'image',
+                            onSelected: (_) => setStateDialog(() => pickType = 'image'),
+                          ),
+                          ChoiceChip(
+                            label: const Text('Video'),
+                            selected: pickType == 'video',
+                            onSelected: (_) => setStateDialog(() => pickType = 'video'),
+                          ),
+                          ChoiceChip(
+                            label: const Text('File'),
+                            selected: pickType == 'file',
+                            onSelected: (_) => setStateDialog(() => pickType = 'file'),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      OutlinedButton.icon(
+                        onPressed: addAttachment,
+                        icon: const Icon(Icons.attachment_rounded),
+                        label: const Text('Add Attachment'),
+                      ),
+                      if (attachments.isNotEmpty) ...[
+                        const SizedBox(height: 8),
+                        ...attachments.asMap().entries.map((entry) {
+                          final index = entry.key;
+                          final item = entry.value;
+                          return ListTile(
+                            contentPadding: EdgeInsets.zero,
+                            leading: Icon(
+                              item['type'] == 'image'
+                                  ? Icons.image_outlined
+                                  : item['type'] == 'video'
+                                      ? Icons.videocam_outlined
+                                      : Icons.insert_drive_file_outlined,
+                            ),
+                            title: Text(item['name'] ?? 'Attachment'),
+                            subtitle: Text((item['type'] ?? 'file').toUpperCase()),
+                            trailing: IconButton(
+                              onPressed: () {
+                                setStateDialog(() => attachments.removeAt(index));
+                              },
+                              icon: const Icon(Icons.delete_outline),
+                            ),
+                          );
+                        }),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: submit,
+                  child: const Text('Post'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  List<Widget> _buildAnnouncementAttachmentTiles(List<dynamic> attachments) {
+    return attachments.asMap().entries.map((entry) {
+      final item = entry.value;
+      final type = _attachmentType(item);
+      final label = _attachmentName(item, entry.key + 1);
+      final data = _attachmentData(item);
+      if (type == 'image' && data.startsWith('data:image/')) {
+        final bytes = _decodeDataUriBytes(data);
+        if (bytes != null) {
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: Image.memory(
+                bytes,
+                height: 170,
+                width: double.infinity,
+                fit: BoxFit.cover,
+              ),
+            ),
+          );
+        }
+      }
+
+      final icon = type == 'video'
+          ? Icons.videocam_outlined
+          : type == 'image'
+              ? Icons.image_outlined
+              : Icons.insert_drive_file_outlined;
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: Row(
+          children: [
+            Icon(icon, size: 18),
+            const SizedBox(width: 8),
+            Expanded(child: Text('${type.toUpperCase()}: $label')),
+          ],
+        ),
+      );
+    }).toList();
+  }
+
+  String _attachmentType(dynamic raw) {
+    if (raw is Map) {
+      return (raw['type']?.toString() ?? 'file').toLowerCase();
+    }
+    return 'file';
+  }
+
+  String _attachmentName(dynamic raw, int fallbackIndex) {
+    if (raw is Map) {
+      final value = raw['name']?.toString().trim();
+      if (value != null && value.isNotEmpty) {
+        return value;
+      }
+    }
+    return 'Attachment $fallbackIndex';
+  }
+
+  String _attachmentData(dynamic raw) {
+    if (raw is Map) {
+      final dataUrl = raw['dataUrl']?.toString() ?? '';
+      if (dataUrl.isNotEmpty) {
+        return dataUrl;
+      }
+      final url = raw['url']?.toString() ?? '';
+      if (url.isNotEmpty) {
+        return url;
+      }
+    }
+    return '';
+  }
+
   Future<void> _openChat(User contact) async {
     final home = context.read<HomeProvider>();
     final auth = context.read<AuthProvider>();
@@ -291,6 +615,9 @@ class _HomeScreenState extends State<HomeScreen> {
     }
 
     final sendController = TextEditingController();
+    String? pickedMediaDataUri;
+    String? pickedFileName;
+    var messageType = 'text';
     var thread = await home.getDirectMessages(contact.id);
     if (!mounted) {
       return;
@@ -302,27 +629,72 @@ class _HomeScreenState extends State<HomeScreen> {
         return StatefulBuilder(
           builder: (context, setStateDialog) {
             Future<void> send() async {
+              String text = sendController.text.trim();
+              if (text.isEmpty && messageType != 'text') {
+                text = _defaultMediaCaption(messageType);
+              }
               final ok = await home.sendDirectMessage(
                 receiverId: contact.id,
-                content: sendController.text,
+                content: text,
+                messageType: messageType,
+                fileUrl: pickedMediaDataUri,
+                fileName: pickedFileName,
               );
               if (!ok) {
                 return;
               }
               sendController.clear();
+              pickedMediaDataUri = null;
+              pickedFileName = null;
+              messageType = 'text';
               thread = await home.getDirectMessages(contact.id);
               setStateDialog(() {});
             }
 
+            Future<void> pickAttachment() async {
+              final picked = await _pickMediaByType(messageType);
+              if (picked == null) {
+                return;
+              }
+              setStateDialog(() {
+                pickedMediaDataUri = picked.$1;
+                pickedFileName = picked.$2;
+              });
+            }
+
             return AlertDialog(
-              title: Text('Chat with ${contact.firstName}'),
+              title: Row(
+                children: [
+                  const CircleAvatar(child: Icon(Icons.person)),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text('${contact.firstName} ${contact.lastName}'.trim()),
+                        Text(
+                          '@${contact.username}',
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
               content: SizedBox(
-                width: 420,
+                width: 460,
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    SizedBox(
-                      height: 280,
+                    Container(
+                      height: 320,
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: Theme.of(context).colorScheme.surfaceContainerHighest.withValues(alpha: 0.45),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
                       child: thread.isEmpty
                           ? const Center(child: Text('No messages yet'))
                           : ListView.builder(
@@ -331,25 +703,63 @@ class _HomeScreenState extends State<HomeScreen> {
                               itemBuilder: (context, index) {
                                 final msg = thread[index];
                                 final mine = msg.sender?.id == current.id;
-                                final scheme = Theme.of(context).colorScheme;
-                                return Align(
-                                  alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
-                                  child: Container(
-                                    margin: const EdgeInsets.symmetric(vertical: 4),
-                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                                    decoration: BoxDecoration(
-                                      color: mine
-                                          ? scheme.primary.withValues(alpha: 0.18)
-                                          : scheme.surfaceVariant,
-                                      borderRadius: BorderRadius.circular(10),
-                                    ),
-                                    child: Text(msg.content),
-                                  ),
+                                return _buildWhatsAppBubble(
+                                  context: context,
+                                  msg: msg,
+                                  mine: mine,
+                                  showSender: !mine,
                                 );
                               },
                             ),
                     ),
                     const SizedBox(height: 10),
+                    Wrap(
+                      spacing: 8,
+                      children: [
+                        ChoiceChip(
+                          label: const Text('Text'),
+                          selected: messageType == 'text',
+                          onSelected: (_) => setStateDialog(() => messageType = 'text'),
+                        ),
+                        ChoiceChip(
+                          label: const Text('Image'),
+                          selected: messageType == 'image',
+                          onSelected: (_) => setStateDialog(() => messageType = 'image'),
+                        ),
+                        ChoiceChip(
+                          label: const Text('Video'),
+                          selected: messageType == 'video',
+                          onSelected: (_) => setStateDialog(() => messageType = 'video'),
+                        ),
+                        ChoiceChip(
+                          label: const Text('File'),
+                          selected: messageType == 'file',
+                          onSelected: (_) => setStateDialog(() => messageType = 'file'),
+                        ),
+                      ],
+                    ),
+                    if (messageType != 'text') ...[
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              pickedFileName == null
+                                  ? 'No attachment selected'
+                                  : 'Selected: $pickedFileName',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          TextButton.icon(
+                            onPressed: pickAttachment,
+                            icon: const Icon(Icons.attachment_rounded),
+                            label: const Text('Pick'),
+                          ),
+                        ],
+                      ),
+                    ],
+                    const SizedBox(height: 8),
                     Row(
                       children: [
                         Expanded(
@@ -379,6 +789,553 @@ class _HomeScreenState extends State<HomeScreen> {
         );
       },
     );
+  }
+
+  Future<void> _openGroupChat(Group group) async {
+    final home = context.read<HomeProvider>();
+    final auth = context.read<AuthProvider>();
+    final current = auth.user;
+    if (current == null) {
+      return;
+    }
+
+    final sendController = TextEditingController();
+    String? pickedMediaDataUri;
+    String? pickedFileName;
+    var messageType = 'text';
+    var thread = await home.getGroupMessages(group.id);
+    if (!mounted) {
+      return;
+    }
+
+    await showDialog<void>(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setStateDialog) {
+            Future<void> send() async {
+              String text = sendController.text.trim();
+              if (text.isEmpty && messageType != 'text') {
+                text = _defaultMediaCaption(messageType);
+              }
+              final ok = await home.sendGroupMessage(
+                groupId: group.id,
+                content: text,
+                messageType: messageType,
+                fileUrl: pickedMediaDataUri,
+                fileName: pickedFileName,
+              );
+              if (!ok) {
+                return;
+              }
+              sendController.clear();
+              pickedMediaDataUri = null;
+              pickedFileName = null;
+              messageType = 'text';
+              thread = await home.getGroupMessages(group.id);
+              setStateDialog(() {});
+            }
+
+            Future<void> pickAttachment() async {
+              final picked = await _pickMediaByType(messageType);
+              if (picked == null) {
+                return;
+              }
+              setStateDialog(() {
+                pickedMediaDataUri = picked.$1;
+                pickedFileName = picked.$2;
+              });
+            }
+
+            Future<void> addFriends() async {
+              await _openAddFriendsDialog(group);
+              thread = await home.getGroupMessages(group.id);
+              setStateDialog(() {});
+            }
+
+            return AlertDialog(
+              title: Row(
+                children: [
+                  const CircleAvatar(child: Icon(Icons.group_rounded)),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(group.name),
+                        Text(
+                          '${group.members.length} members',
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              content: SizedBox(
+                width: 460,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      height: 320,
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: Theme.of(context).colorScheme.surfaceContainerHighest.withValues(alpha: 0.45),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: thread.isEmpty
+                          ? const Center(child: Text('No group messages yet'))
+                          : ListView.builder(
+                              reverse: true,
+                              itemCount: thread.length,
+                              itemBuilder: (context, index) {
+                                final msg = thread[index];
+                                final mine = msg.sender?.id == current.id;
+                                return _buildWhatsAppBubble(
+                                  context: context,
+                                  msg: msg,
+                                  mine: mine,
+                                  showSender: !mine,
+                                );
+                              },
+                            ),
+                    ),
+                    const SizedBox(height: 10),
+                    Wrap(
+                      spacing: 8,
+                      children: [
+                        ChoiceChip(
+                          label: const Text('Text'),
+                          selected: messageType == 'text',
+                          onSelected: (_) => setStateDialog(() => messageType = 'text'),
+                        ),
+                        ChoiceChip(
+                          label: const Text('Image'),
+                          selected: messageType == 'image',
+                          onSelected: (_) => setStateDialog(() => messageType = 'image'),
+                        ),
+                        ChoiceChip(
+                          label: const Text('Video'),
+                          selected: messageType == 'video',
+                          onSelected: (_) => setStateDialog(() => messageType = 'video'),
+                        ),
+                        ChoiceChip(
+                          label: const Text('File'),
+                          selected: messageType == 'file',
+                          onSelected: (_) => setStateDialog(() => messageType = 'file'),
+                        ),
+                      ],
+                    ),
+                    if (messageType != 'text') ...[
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              pickedFileName == null
+                                  ? 'No attachment selected'
+                                  : 'Selected: $pickedFileName',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          TextButton.icon(
+                            onPressed: pickAttachment,
+                            icon: const Icon(Icons.attachment_rounded),
+                            label: const Text('Pick'),
+                          ),
+                        ],
+                      ),
+                    ],
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: sendController,
+                            decoration: const InputDecoration(labelText: 'Type message'),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        IconButton(
+                          onPressed: send,
+                          icon: const Icon(Icons.send_rounded),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton.icon(
+                  onPressed: addFriends,
+                  icon: const Icon(Icons.group_add_outlined),
+                  label: const Text('Add Friends'),
+                ),
+                TextButton.icon(
+                  onPressed: () => home.startGroupVoiceChat(group.id),
+                  icon: const Icon(Icons.call),
+                  label: const Text('Voice Chat'),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Close'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<void> _openAddFriendsDialog(Group group) async {
+    final home = context.read<HomeProvider>();
+    await home.refreshUsers();
+    await home.refreshGroups();
+    if (!mounted) {
+      return;
+    }
+
+    final currentGroup = home.groups.firstWhere(
+      (g) => g.id == group.id,
+      orElse: () => group,
+    );
+    final existingIds = currentGroup.members.map((m) => m.user.id).toSet();
+    final users = home.allUsers
+        .where((u) => u.role == 'student' && !existingIds.contains(u.id))
+        .toList();
+    final selected = <String>{};
+
+    await showDialog<void>(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setStateDialog) {
+            Future<void> addNow() async {
+              final ok = await home.addMembersToGroup(
+                group: currentGroup,
+                userIds: selected.toList(),
+              );
+              if (!context.mounted) {
+                return;
+              }
+              if (!ok) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Some contacts could not be added.')),
+                );
+              }
+              Navigator.pop(context);
+            }
+
+            return AlertDialog(
+              title: Text('Add Friends to ${currentGroup.name}'),
+              content: SizedBox(
+                width: 420,
+                height: 380,
+                child: users.isEmpty
+                    ? const Center(child: Text('No more contacts available to add.'))
+                    : ListView.builder(
+                        itemCount: users.length,
+                        itemBuilder: (context, index) {
+                          final user = users[index];
+                          final checked = selected.contains(user.id);
+                          return CheckboxListTile(
+                            value: checked,
+                            onChanged: (value) {
+                              setStateDialog(() {
+                                if (value == true) {
+                                  selected.add(user.id);
+                                } else {
+                                  selected.remove(user.id);
+                                }
+                              });
+                            },
+                            title: Text('${user.firstName} ${user.lastName}'.trim()),
+                            subtitle: Text('@${user.username}'),
+                          );
+                        },
+                      ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: selected.isEmpty ? null : addNow,
+                  child: const Text('Add'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<void> _openCreateGroupDialog() async {
+    final home = context.read<HomeProvider>();
+    await home.refreshUsers();
+    if (!mounted) {
+      return;
+    }
+    final users = home.allUsers.where((u) => u.role == 'student').toList();
+    final nameController = TextEditingController();
+    final descController = TextEditingController();
+    final selected = <String>{};
+
+    await showDialog<void>(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setStateDialog) {
+            Future<void> create() async {
+              final ok = await home.createStudentGroup(
+                name: nameController.text,
+                description: descController.text,
+                memberIds: selected.toList(),
+              );
+              if (!ok) {
+                return;
+              }
+              if (context.mounted) {
+                Navigator.pop(context);
+              }
+            }
+
+            return AlertDialog(
+              title: const Text('Create Group'),
+              content: SizedBox(
+                width: 460,
+                height: 440,
+                child: Column(
+                  children: [
+                    TextField(
+                      controller: nameController,
+                      decoration: const InputDecoration(labelText: 'Group name'),
+                    ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: descController,
+                      decoration: const InputDecoration(labelText: 'Description'),
+                    ),
+                    const SizedBox(height: 12),
+                    const Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text('Add Friends'),
+                    ),
+                    const SizedBox(height: 8),
+                    Expanded(
+                      child: ListView.builder(
+                        itemCount: users.length,
+                        itemBuilder: (context, index) {
+                          final user = users[index];
+                          final checked = selected.contains(user.id);
+                          return CheckboxListTile(
+                            value: checked,
+                            onChanged: (value) {
+                              setStateDialog(() {
+                                if (value == true) {
+                                  selected.add(user.id);
+                                } else {
+                                  selected.remove(user.id);
+                                }
+                              });
+                            },
+                            title: Text('${user.firstName} ${user.lastName}'.trim()),
+                            subtitle: Text('@${user.username}'),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: create,
+                  child: const Text('Create'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  String _messagePreview(Message msg) {
+    if (msg.messageType == 'image' && (msg.fileUrl ?? '').isNotEmpty) {
+      return msg.content.isNotEmpty ? msg.content : '[Image]';
+    }
+    if (msg.messageType == 'video' && (msg.fileUrl ?? '').isNotEmpty) {
+      return msg.content.isNotEmpty ? msg.content : '[Video]';
+    }
+    if (msg.messageType == 'file' && (msg.fileUrl ?? '').isNotEmpty) {
+      final name = (msg.fileName ?? '').trim();
+      return name.isEmpty ? '[File]' : '[File] $name';
+    }
+    return msg.content;
+  }
+
+  Widget _buildWhatsAppBubble({
+    required BuildContext context,
+    required Message msg,
+    required bool mine,
+    required bool showSender,
+  }) {
+    final scheme = Theme.of(context).colorScheme;
+    final sender = msg.sender;
+    final senderName = sender == null
+        ? 'Unknown'
+        : '${sender.firstName} ${sender.lastName}'.trim();
+    final senderUsername = sender?.username ?? 'user';
+
+    return Align(
+      alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 300),
+        child: Container(
+          margin: const EdgeInsets.symmetric(vertical: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          decoration: BoxDecoration(
+            color: mine ? const Color(0xFFDCF8C6) : scheme.surface,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: scheme.outline.withValues(alpha: 0.2)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (showSender) ...[
+                Text(
+                  '$senderName  @$senderUsername',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    color: scheme.primary,
+                  ),
+                ),
+                const SizedBox(height: 3),
+              ],
+              if (msg.messageType == 'image' &&
+                  (msg.fileUrl ?? '').startsWith('data:image/'))
+                _buildDataUriImage(msg.fileUrl!)
+              else
+                Text(_messagePreview(msg)),
+              const SizedBox(height: 3),
+              Align(
+                alignment: Alignment.centerRight,
+                child: Text(
+                  _formatChatTime(msg.createdAt),
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: scheme.onSurface.withValues(alpha: 0.6),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  String _formatChatTime(DateTime dateTime) {
+    final hour = dateTime.hour.toString().padLeft(2, '0');
+    final minute = dateTime.minute.toString().padLeft(2, '0');
+    return '$hour:$minute';
+  }
+
+  Widget _buildDataUriImage(String dataUri) {
+    final bytes = _decodeDataUriBytes(dataUri);
+    if (bytes == null) {
+      return const Text('[Image]');
+    }
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(10),
+      child: Image.memory(
+        bytes,
+        height: 170,
+        width: 220,
+        fit: BoxFit.cover,
+      ),
+    );
+  }
+
+  Future<(String, String)?> _pickMediaByType(String messageType) async {
+    if (messageType == 'image') {
+      final file = await _imagePicker.pickImage(source: ImageSource.gallery, imageQuality: 85);
+      if (file == null) {
+        return null;
+      }
+      final bytes = await file.readAsBytes();
+      return (_toDataUri(bytes, 'image/jpeg'), file.name);
+    }
+    if (messageType == 'video') {
+      final file = await _imagePicker.pickVideo(source: ImageSource.gallery);
+      if (file == null) {
+        return null;
+      }
+      final bytes = await file.readAsBytes();
+      return (_toDataUri(bytes, 'video/mp4'), file.name);
+    }
+    if (messageType == 'file') {
+      final picked = await FilePicker.platform.pickFiles(withData: true);
+      if (picked == null || picked.files.isEmpty) {
+        return null;
+      }
+      final file = picked.files.first;
+      final bytes = file.bytes;
+      if (bytes == null) {
+        return null;
+      }
+      return (_toDataUri(bytes, 'application/octet-stream'), file.name);
+    }
+    return null;
+  }
+
+  String _defaultMediaCaption(String messageType) {
+    if (messageType == 'image') return 'Image';
+    if (messageType == 'video') return 'Video';
+    if (messageType == 'file') return 'File';
+    return '';
+  }
+
+  String _toDataUri(Uint8List bytes, String mimeType) {
+    return 'data:$mimeType;base64,${base64Encode(bytes)}';
+  }
+
+  Uint8List? _decodeDataUriBytes(String dataUri) {
+    final index = dataUri.indexOf(',');
+    if (index == -1) {
+      return null;
+    }
+    final payload = dataUri.substring(index + 1);
+    try {
+      return base64Decode(payload);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Map<String, dynamic> _decode(String raw) {
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map<String, dynamic>) {
+        return decoded;
+      }
+      return <String, dynamic>{};
+    } catch (_) {
+      return <String, dynamic>{};
+    }
   }
 
   Future<void> _openStartChatPicker() async {
@@ -659,9 +1616,9 @@ class _HomeScreenState extends State<HomeScreen> {
                                   final subtitle = [
                                     item.materialType,
                                     if (item.subjectName.isNotEmpty) item.subjectName,
-                                    if (item.resourceUrl.isNotEmpty) item.resourceUrl,
-                                  ].join(' • ');
-
+                                    if (item.resourceUrl.isNotEmpty)
+                                      item.resourceUrl.startsWith('data:') ? 'Attached resource' : item.resourceUrl,
+                                  ].join(' | ');
                                   return ListTile(
                                     leading: const Icon(Icons.menu_book_rounded),
                                     title: Text(item.title),
@@ -685,6 +1642,231 @@ class _HomeScreenState extends State<HomeScreen> {
                 FilledButton(
                   onPressed: load,
                   child: const Text('Fetch Materials'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<void> _openUploadNotesDialog() async {
+    final auth = context.read<AuthProvider>();
+    final user = auth.user;
+    if (user == null || (user.role != 'faculty' && user.role != 'admin')) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Only faculty/admin can upload notes.')),
+      );
+      return;
+    }
+
+    final titleController = TextEditingController();
+    final descController = TextEditingController();
+    final courseCodeController = TextEditingController();
+    final subjectController = TextEditingController();
+    final semesterController = TextEditingController();
+    final tagsController = TextEditingController();
+    final urlController = TextEditingController();
+    var materialType = 'notes';
+    var attachType = 'file';
+    String? attachmentDataUri;
+    String? attachmentName;
+    bool submitting = false;
+
+    await showDialog<void>(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setStateDialog) {
+            Future<void> pickAttachment() async {
+              final picked = await _pickMediaByType(attachType);
+              if (picked == null) {
+                return;
+              }
+              setStateDialog(() {
+                attachmentDataUri = picked.$1;
+                attachmentName = picked.$2;
+                urlController.clear();
+              });
+            }
+
+            Future<void> submit() async {
+              final title = titleController.text.trim();
+              final courseCode = courseCodeController.text.trim().toUpperCase();
+              if (title.isEmpty || courseCode.isEmpty) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Title and Course Code are required.')),
+                );
+                return;
+              }
+
+              setStateDialog(() => submitting = true);
+              final response = await ApiService.createStudyMaterial({
+                'title': title,
+                'description': descController.text.trim(),
+                'courseCode': courseCode,
+                'subjectName': subjectController.text.trim(),
+                'department': user.department ?? '',
+                'semester': semesterController.text.trim(),
+                'materialType': materialType,
+                'resourceUrl': attachmentDataUri ?? urlController.text.trim(),
+                'tags': tagsController.text
+                    .split(',')
+                    .map((t) => t.trim())
+                    .where((t) => t.isNotEmpty)
+                    .toList(),
+              });
+              final data = _decode(response.body);
+              if (!mounted) {
+                return;
+              }
+              setStateDialog(() => submitting = false);
+
+              if (response.statusCode != 201 || data['success'] != true) {
+                ScaffoldMessenger.of(this.context).showSnackBar(
+                  SnackBar(content: Text(data['message']?.toString() ?? 'Failed to upload note')),
+                );
+                return;
+              }
+              if (context.mounted) {
+                Navigator.pop(context);
+              }
+              ScaffoldMessenger.of(this.context).showSnackBar(
+                const SnackBar(content: Text('Note uploaded successfully')),
+              );
+            }
+
+            return AlertDialog(
+              title: const Text('Upload Notes'),
+              content: SizedBox(
+                width: 560,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      TextField(
+                        controller: titleController,
+                        decoration: const InputDecoration(labelText: 'Title *'),
+                      ),
+                      const SizedBox(height: 8),
+                      TextField(
+                        controller: descController,
+                        minLines: 2,
+                        maxLines: 3,
+                        decoration: const InputDecoration(labelText: 'Description'),
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: TextField(
+                              controller: courseCodeController,
+                              decoration: const InputDecoration(labelText: 'Course Code *'),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: DropdownButtonFormField<String>(
+                              initialValue: materialType,
+                              decoration: const InputDecoration(labelText: 'Type'),
+                              items: const [
+                                DropdownMenuItem(value: 'notes', child: Text('Notes')),
+                                DropdownMenuItem(value: 'pdf', child: Text('PDF')),
+                                DropdownMenuItem(value: 'ppt', child: Text('PPT')),
+                                DropdownMenuItem(value: 'video', child: Text('Video')),
+                                DropdownMenuItem(value: 'link', child: Text('Link')),
+                              ],
+                              onChanged: (value) {
+                                if (value == null) return;
+                                setStateDialog(() => materialType = value);
+                              },
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: TextField(
+                              controller: subjectController,
+                              decoration: const InputDecoration(labelText: 'Subject'),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: TextField(
+                              controller: semesterController,
+                              decoration: const InputDecoration(labelText: 'Semester'),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      TextField(
+                        controller: tagsController,
+                        decoration: const InputDecoration(labelText: 'Tags (comma separated)'),
+                      ),
+                      const SizedBox(height: 8),
+                      TextField(
+                        controller: urlController,
+                        decoration: const InputDecoration(
+                          labelText: 'Resource URL (optional if attachment selected)',
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 8,
+                        children: [
+                          ChoiceChip(
+                            label: const Text('File'),
+                            selected: attachType == 'file',
+                            onSelected: (_) => setStateDialog(() => attachType = 'file'),
+                          ),
+                          ChoiceChip(
+                            label: const Text('Image'),
+                            selected: attachType == 'image',
+                            onSelected: (_) => setStateDialog(() => attachType = 'image'),
+                          ),
+                          ChoiceChip(
+                            label: const Text('Video'),
+                            selected: attachType == 'video',
+                            onSelected: (_) => setStateDialog(() => attachType = 'video'),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      OutlinedButton.icon(
+                        onPressed: pickAttachment,
+                        icon: const Icon(Icons.attach_file_rounded),
+                        label: const Text('Attach'),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        attachmentName ?? 'No attachment selected',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: submitting ? null : submit,
+                  child: submitting
+                      ? const SizedBox(
+                          height: 18,
+                          width: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Text('Upload'),
                 ),
               ],
             );
@@ -902,63 +2084,66 @@ class _HomeScreenState extends State<HomeScreen> {
       return;
     }
 
-    final photoController = TextEditingController(text: user.profilePicture ?? '');
+    String pickedPhotoDataUri = user.profilePicture ?? '';
+    Uint8List? pickedPhotoPreview = _decodeDataUriBytes(pickedPhotoDataUri);
 
     await showDialog<void>(
       context: context,
       builder: (context) {
-        return AlertDialog(
-          title: const Text('Change Profile Photo'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: photoController,
-                decoration: const InputDecoration(
-                  labelText: 'Photo URL',
-                  hintText: 'https://...',
-                ),
-              ),
-              const SizedBox(height: 12),
-              if (photoController.text.trim().isNotEmpty)
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(12),
-                  child: Image.network(
-                    photoController.text.trim(),
-                    height: 120,
-                    width: 120,
-                    fit: BoxFit.cover,
-                    errorBuilder: (context, error, stackTrace) => Container(
-                      height: 120,
-                      width: 120,
-                      color: Theme.of(context).colorScheme.surfaceVariant,
-                      alignment: Alignment.center,
-                      child: const Text('Preview unavailable'),
-                    ),
+        return StatefulBuilder(
+          builder: (context, setStateDialog) {
+            Future<void> pickPhoto() async {
+              final file = await _imagePicker.pickImage(source: ImageSource.gallery, imageQuality: 85);
+              if (file == null) {
+                return;
+              }
+              final bytes = await file.readAsBytes();
+              setStateDialog(() {
+                pickedPhotoDataUri = _toDataUri(bytes, 'image/jpeg');
+                pickedPhotoPreview = bytes;
+              });
+            }
+
+            return AlertDialog(
+              title: const Text('Change Profile Photo'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  CircleAvatar(
+                    radius: 54,
+                    backgroundImage: pickedPhotoPreview != null ? MemoryImage(pickedPhotoPreview!) : null,
+                    child: pickedPhotoPreview == null ? const Icon(Icons.person, size: 44) : null,
                   ),
+                  const SizedBox(height: 12),
+                  OutlinedButton.icon(
+                    onPressed: pickPhoto,
+                    icon: const Icon(Icons.photo_library_outlined),
+                    label: const Text('Choose from Gallery'),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Cancel'),
                 ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () async {
-                final ok = await auth.updateProfile(
-                  firstName: user.firstName,
-                  lastName: user.lastName,
-                  department: user.department ?? '',
-                  profilePicture: photoController.text.trim(),
-                );
-                if (ok && context.mounted) {
-                  Navigator.pop(context);
-                }
-              },
-              child: const Text('Save Photo'),
-            ),
-          ],
+                FilledButton(
+                  onPressed: () async {
+                    final ok = await auth.updateProfile(
+                      firstName: user.firstName,
+                      lastName: user.lastName,
+                      department: user.department ?? '',
+                      profilePicture: pickedPhotoDataUri,
+                    );
+                    if (ok && context.mounted) {
+                      Navigator.pop(context);
+                    }
+                  },
+                  child: const Text('Save Photo'),
+                ),
+              ],
+            );
+          },
         );
       },
     );
@@ -1099,9 +2284,9 @@ class DashboardPage extends StatelessWidget {
               onTap: () => onQuickAction(1),
             ),
             _QuickTile(
-              icon: Icons.event_available_rounded,
-              title: 'Groups',
-              subtitle: 'Your active groups',
+              icon: Icons.work_outline_rounded,
+              title: 'Placements',
+              subtitle: 'Internship updates',
               color: scheme.tertiary,
               onTap: () => onQuickAction(2),
             ),
@@ -1123,12 +2308,18 @@ class AnnouncementsPage extends StatelessWidget {
   final List<Announcement> announcements;
   final Future<void> Function() onRefresh;
   final ValueChanged<Announcement> onOpen;
+  final VoidCallback onEnterBroadcasts;
+  final bool canPostCircular;
+  final VoidCallback onPostCircular;
 
   const AnnouncementsPage({
     super.key,
     required this.announcements,
     required this.onRefresh,
     required this.onOpen,
+    required this.onEnterBroadcasts,
+    required this.canPostCircular,
+    required this.onPostCircular,
   });
 
   @override
@@ -1138,9 +2329,22 @@ class AnnouncementsPage extends StatelessWidget {
       return RefreshIndicator(
         onRefresh: onRefresh,
         child: ListView(
-          children: const [
-            SizedBox(height: 180),
-            Center(child: Text('No announcements yet. Pull down to refresh.')),
+          padding: const EdgeInsets.all(16),
+          children: [
+            _BroadcastJoinCard(onEnterBroadcasts: onEnterBroadcasts),
+            if (canPostCircular) ...[
+              const SizedBox(height: 8),
+              Align(
+                alignment: Alignment.centerRight,
+                child: FilledButton.icon(
+                  onPressed: onPostCircular,
+                  icon: const Icon(Icons.post_add_rounded),
+                  label: const Text('Post Circular'),
+                ),
+              ),
+            ],
+            const SizedBox(height: 180),
+            const Center(child: Text('No announcements yet. Pull down to refresh.')),
           ],
         ),
       );
@@ -1148,30 +2352,179 @@ class AnnouncementsPage extends StatelessWidget {
 
     return RefreshIndicator(
       onRefresh: onRefresh,
-      child: ListView.builder(
+      child: ListView(
         key: const ValueKey('announcements'),
         padding: const EdgeInsets.all(16),
-        itemCount: announcements.length,
-        itemBuilder: (context, index) {
-          final item = announcements[index];
-          return Card(
-            margin: const EdgeInsets.only(bottom: 10),
-            child: ListTile(
-              contentPadding: const EdgeInsets.all(14),
-              leading: CircleAvatar(
-                backgroundColor: scheme.primary.withValues(alpha: 0.18),
-                child: Icon(Icons.campaign_rounded, color: scheme.primary),
+        children: [
+          _BroadcastJoinCard(onEnterBroadcasts: onEnterBroadcasts),
+          if (canPostCircular) ...[
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerRight,
+              child: FilledButton.icon(
+                onPressed: onPostCircular,
+                icon: const Icon(Icons.post_add_rounded),
+                label: const Text('Post Circular'),
               ),
-              title: Text(item.title, style: const TextStyle(fontWeight: FontWeight.w600)),
-              subtitle: Padding(
-                padding: const EdgeInsets.only(top: 6),
-                child: Text(item.content, maxLines: 2, overflow: TextOverflow.ellipsis),
-              ),
-              trailing: const Icon(Icons.chevron_right_rounded),
-              onTap: () => onOpen(item),
             ),
-          );
-        },
+          ],
+          const SizedBox(height: 10),
+          ...announcements.map((item) {
+            return Card(
+              margin: const EdgeInsets.only(bottom: 10),
+              child: ListTile(
+                contentPadding: const EdgeInsets.all(14),
+                leading: CircleAvatar(
+                  backgroundColor: scheme.primary.withValues(alpha: 0.18),
+                  child: Icon(Icons.campaign_rounded, color: scheme.primary),
+                ),
+                title: Text(item.title, style: const TextStyle(fontWeight: FontWeight.w600)),
+                subtitle: Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text(item.content, maxLines: 2, overflow: TextOverflow.ellipsis),
+                ),
+                trailing: const Icon(Icons.chevron_right_rounded),
+                onTap: () => onOpen(item),
+              ),
+            );
+          }),
+        ],
+      ),
+    );
+  }
+}
+
+class InternshipPlacementPage extends StatelessWidget {
+  final List<Announcement> announcements;
+  final Future<void> Function() onRefresh;
+  final ValueChanged<Announcement> onOpen;
+  final bool canPostCircular;
+  final VoidCallback onPostCircular;
+
+  const InternshipPlacementPage({
+    super.key,
+    required this.announcements,
+    required this.onRefresh,
+    required this.onOpen,
+    required this.canPostCircular,
+    required this.onPostCircular,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final updates = announcements.where(_isPlacementUpdate).toList();
+
+    if (updates.isEmpty) {
+      return RefreshIndicator(
+        onRefresh: onRefresh,
+        child: ListView(
+          padding: const EdgeInsets.all(16),
+          children: [
+            if (canPostCircular)
+              Align(
+                alignment: Alignment.centerRight,
+                child: FilledButton.icon(
+                  onPressed: onPostCircular,
+                  icon: const Icon(Icons.post_add_rounded),
+                  label: const Text('Post Circular'),
+                ),
+              ),
+            const SizedBox(height: 180),
+            const Center(child: Text('No internship or placement updates yet. Pull down to refresh.')),
+          ],
+        ),
+      );
+    }
+
+    return RefreshIndicator(
+      onRefresh: onRefresh,
+      child: ListView(
+        key: const ValueKey('internship-updates'),
+        padding: const EdgeInsets.all(16),
+        children: [
+          if (canPostCircular)
+            Align(
+              alignment: Alignment.centerRight,
+              child: FilledButton.icon(
+                onPressed: onPostCircular,
+                icon: const Icon(Icons.post_add_rounded),
+                label: const Text('Post Circular'),
+              ),
+            ),
+          const SizedBox(height: 10),
+          ...updates.map((item) {
+            return Card(
+              margin: const EdgeInsets.only(bottom: 10),
+              child: ListTile(
+                contentPadding: const EdgeInsets.all(14),
+                leading: CircleAvatar(
+                  backgroundColor: scheme.primary.withValues(alpha: 0.18),
+                  child: Icon(Icons.work_outline_rounded, color: scheme.primary),
+                ),
+                title: Text(item.title, style: const TextStyle(fontWeight: FontWeight.w600)),
+                subtitle: Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text(item.content, maxLines: 2, overflow: TextOverflow.ellipsis),
+                ),
+                trailing: const Icon(Icons.chevron_right_rounded),
+                onTap: () => onOpen(item),
+              ),
+            );
+          }),
+        ],
+      ),
+    );
+  }
+
+  bool _isPlacementUpdate(Announcement item) {
+    final haystack = '${item.title} ${item.content} ${item.category}'.toLowerCase();
+    return haystack.contains('internship') ||
+        haystack.contains('placement') ||
+        haystack.contains('career') ||
+        haystack.contains('recruit') ||
+        haystack.contains('job');
+  }
+}
+
+class _BroadcastJoinCard extends StatelessWidget {
+  final VoidCallback onEnterBroadcasts;
+
+  const _BroadcastJoinCard({
+    required this.onEnterBroadcasts,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Card(
+      margin: const EdgeInsets.only(bottom: 6),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Row(
+          children: [
+            CircleAvatar(
+              backgroundColor: scheme.secondary.withValues(alpha: 0.18),
+              child: Icon(Icons.record_voice_over_rounded, color: scheme.secondary),
+            ),
+            const SizedBox(width: 12),
+            const Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Faculty Broadcasts', style: TextStyle(fontWeight: FontWeight.w700)),
+                  SizedBox(height: 4),
+                  Text('Students can join active broadcasts from Meeting Invites.'),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            FilledButton(
+              onPressed: onEnterBroadcasts,
+              child: const Text('Enter'),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1180,6 +2533,7 @@ class AnnouncementsPage extends StatelessWidget {
 class ChatPage extends StatelessWidget {
   final User? currentUser;
   final List<User> contacts;
+  final List<Group> groups;
   final List<User> allUsers;
   final List<Message> messages;
   final List<CallInvite> incomingCalls;
@@ -1187,6 +2541,8 @@ class ChatPage extends StatelessWidget {
   final Future<void> Function() onRefresh;
   final ValueChanged<User> onOpenChat;
   final VoidCallback onStartChat;
+  final VoidCallback onCreateGroup;
+  final ValueChanged<Group> onOpenGroupChat;
   final VoidCallback onStartMeeting;
   final ValueChanged<CallInvite> onAcceptCall;
   final ValueChanged<CallInvite> onRejectCall;
@@ -1196,6 +2552,7 @@ class ChatPage extends StatelessWidget {
     super.key,
     required this.currentUser,
     required this.contacts,
+    required this.groups,
     required this.allUsers,
     required this.messages,
     required this.incomingCalls,
@@ -1203,6 +2560,8 @@ class ChatPage extends StatelessWidget {
     required this.onRefresh,
     required this.onOpenChat,
     required this.onStartChat,
+    required this.onCreateGroup,
+    required this.onOpenGroupChat,
     required this.onStartMeeting,
     required this.onAcceptCall,
     required this.onRejectCall,
@@ -1211,118 +2570,203 @@ class ChatPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
     final available = contacts.isEmpty ? allUsers : contacts;
     final role = currentUser?.role ?? '';
+    final allGroups = List<Group>.from(groups);
+    allGroups.sort((a, b) {
+      final aIsCec = a.name.trim().toLowerCase() == 'cec assemble';
+      final bIsCec = b.name.trim().toLowerCase() == 'cec assemble';
+      if (aIsCec && !bIsCec) return -1;
+      if (!aIsCec && bIsCec) return 1;
+      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+    });
 
-    if (contacts.isEmpty) {
-      return RefreshIndicator(
-        onRefresh: onRefresh,
-        child: ListView(
-          children: [
-            const SizedBox(height: 16),
-            if (role == 'faculty' || role == 'admin')
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: _MeetingCard(
-                  isFaculty: true,
-                  incomingCalls: const [],
-                  outgoingCalls: outgoingCalls,
-                  onStartMeeting: onStartMeeting,
-                  onAcceptCall: onAcceptCall,
-                  onRejectCall: onRejectCall,
-                  onEndCall: onEndCall,
-                ),
-              ),
-            if (role == 'student')
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: _MeetingCard(
-                  isFaculty: false,
-                  incomingCalls: incomingCalls,
-                  outgoingCalls: const [],
-                  onStartMeeting: onStartMeeting,
-                  onAcceptCall: onAcceptCall,
-                  onRejectCall: onRejectCall,
-                  onEndCall: onEndCall,
-                ),
-              ),
-            const SizedBox(height: 140),
-            const Center(child: Text('No conversations yet. Start a chat now.')),
-            const SizedBox(height: 12),
-            Center(
-              child: ElevatedButton.icon(
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        children: [
+          _MeetingCard(
+            isFaculty: role == 'faculty' || role == 'admin',
+            incomingCalls: incomingCalls,
+            outgoingCalls: outgoingCalls,
+            onStartMeeting: onStartMeeting,
+            onAcceptCall: onAcceptCall,
+            onRejectCall: onRejectCall,
+            onEndCall: onEndCall,
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: [
+              ElevatedButton.icon(
                 onPressed: onStartChat,
                 icon: const Icon(Icons.add_comment_outlined),
-                label: const Text('Start Chat'),
+                label: const Text('Start New Chat'),
               ),
-            ),
-          ],
-        ),
-      );
-    }
-
-    return RefreshIndicator(
-      onRefresh: onRefresh,
-      child: ListView.builder(
-        key: const ValueKey('chat'),
-        padding: const EdgeInsets.all(16),
-        itemCount: available.length + 1,
-        itemBuilder: (context, index) {
-          if (index == 0) {
-            return Column(
-              children: [
-                _MeetingCard(
-                  isFaculty: role == 'faculty' || role == 'admin',
-                  incomingCalls: incomingCalls,
-                  outgoingCalls: outgoingCalls,
-                  onStartMeeting: onStartMeeting,
-                  onAcceptCall: onAcceptCall,
-                  onRejectCall: onRejectCall,
-                  onEndCall: onEndCall,
-                ),
-                const SizedBox(height: 10),
-                ElevatedButton.icon(
-                  onPressed: onStartChat,
-                  icon: const Icon(Icons.add_comment_outlined),
-                  label: const Text('Start New Chat'),
-                ),
-                const SizedBox(height: 10),
-              ],
-            );
-          }
-
-          final contact = available[index - 1];
-          final last = messages.firstWhere(
-            (m) => m.sender?.id == contact.id || m.receiver?.id == contact.id,
-            orElse: () => Message(
-              id: 'tmp',
-              content: 'Tap to start chatting',
-              isRead: true,
-              isDeleted: false,
-              createdAt: DateTime.now(),
-              updatedAt: DateTime.now(),
-            ),
-          );
-
-          return Card(
-            margin: const EdgeInsets.only(bottom: 10),
-            child: ListTile(
-              contentPadding: const EdgeInsets.all(12),
-              leading: CircleAvatar(
-                backgroundColor: scheme.secondary.withValues(alpha: 0.18),
-                child: Icon(Icons.person, color: scheme.secondary),
+              FilledButton.icon(
+                onPressed: onCreateGroup,
+                icon: const Icon(Icons.group_add_outlined),
+                label: const Text('Create Group'),
               ),
-              title: Text(
-                '${contact.firstName} ${contact.lastName}'.trim(),
-                style: const TextStyle(fontWeight: FontWeight.w600),
-              ),
-              subtitle: Text(last.content, maxLines: 1, overflow: TextOverflow.ellipsis),
-              trailing: const Icon(Icons.chevron_right_rounded),
-              onTap: () => onOpenChat(contact),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Expanded(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final splitView = constraints.maxWidth >= 900;
+                if (!splitView) {
+                  return ListView(
+                    children: [
+                      SizedBox(
+                        height: 360,
+                        child: _buildPersonalPane(context, available),
+                      ),
+                      const SizedBox(height: 12),
+                      SizedBox(
+                        height: 360,
+                        child: _buildGroupPane(context, allGroups),
+                      ),
+                    ],
+                  );
+                }
+                return Row(
+                  children: [
+                    Expanded(child: _buildPersonalPane(context, available)),
+                    const SizedBox(width: 12),
+                    Expanded(child: _buildGroupPane(context, allGroups)),
+                  ],
+                );
+              },
             ),
-          );
-        },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPersonalPane(BuildContext context, List<User> available) {
+    final scheme = Theme.of(context).colorScheme;
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        children: [
+          ListTile(
+            title: Text(
+              'Personal Chats',
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+            ),
+          ),
+          const Divider(height: 1),
+          Expanded(
+            child: RefreshIndicator(
+              onRefresh: onRefresh,
+              child: available.isEmpty
+                  ? ListView(
+                      children: const [
+                        SizedBox(height: 120),
+                        Center(child: Text('No personal conversations yet.')),
+                      ],
+                    )
+                  : ListView.builder(
+                      itemCount: available.length,
+                      itemBuilder: (context, index) {
+                        final contact = available[index];
+                        final last = messages.firstWhere(
+                          (m) =>
+                              (m.groupId == null || m.groupId!.isEmpty) &&
+                              (m.sender?.id == contact.id || m.receiver?.id == contact.id),
+                          orElse: () => Message(
+                            id: 'tmp',
+                            content: 'Tap to start chatting',
+                            isRead: true,
+                            isDeleted: false,
+                            createdAt: DateTime.now(),
+                            updatedAt: DateTime.now(),
+                          ),
+                        );
+                        return ListTile(
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                          leading: CircleAvatar(
+                            backgroundColor: scheme.secondary.withValues(alpha: 0.18),
+                            child: Icon(Icons.person, color: scheme.secondary),
+                          ),
+                          title: Text(
+                            '${contact.firstName} ${contact.lastName}'.trim(),
+                            style: const TextStyle(fontWeight: FontWeight.w600),
+                          ),
+                          subtitle: Text(last.content, maxLines: 1, overflow: TextOverflow.ellipsis),
+                          trailing: const Icon(Icons.chevron_right_rounded),
+                          onTap: () => onOpenChat(contact),
+                        );
+                      },
+                    ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildGroupPane(BuildContext context, List<Group> allGroups) {
+    final scheme = Theme.of(context).colorScheme;
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        children: [
+          ListTile(
+            title: Text(
+              'Group Chatrooms',
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+            ),
+          ),
+          const Divider(height: 1),
+          Expanded(
+            child: RefreshIndicator(
+              onRefresh: onRefresh,
+              child: allGroups.isEmpty
+                  ? ListView(
+                      children: const [
+                        SizedBox(height: 120),
+                        Center(child: Text('No groups yet. Create one to start.')),
+                      ],
+                    )
+                  : ListView.builder(
+                      itemCount: allGroups.length,
+                      itemBuilder: (context, index) {
+                        final group = allGroups[index];
+                        final lastGroupMessage = messages.firstWhere(
+                          (m) => m.groupId == group.id,
+                          orElse: () => Message(
+                            id: 'tmp-group-${group.id}',
+                            content: 'Group created',
+                            isRead: true,
+                            isDeleted: false,
+                            createdAt: DateTime.now(),
+                            updatedAt: DateTime.now(),
+                          ),
+                        );
+                        return ListTile(
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                          leading: CircleAvatar(
+                            backgroundColor: scheme.tertiary.withValues(alpha: 0.2),
+                            child: Icon(Icons.groups_rounded, color: scheme.tertiary),
+                          ),
+                          title: Text(group.name, style: const TextStyle(fontWeight: FontWeight.w700)),
+                          subtitle: Text(
+                            lastGroupMessage.content,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          trailing: const Icon(Icons.chevron_right_rounded),
+                          onTap: () => onOpenGroupChat(group),
+                        );
+                      },
+                    ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -1461,6 +2905,7 @@ class ProfilePage extends StatelessWidget {
   final VoidCallback onEditPhoto;
   final VoidCallback onPrivacy;
   final VoidCallback onHelp;
+  final VoidCallback onUploadNotes;
 
   const ProfilePage({
     super.key,
@@ -1468,6 +2913,7 @@ class ProfilePage extends StatelessWidget {
     required this.onEditPhoto,
     required this.onPrivacy,
     required this.onHelp,
+    required this.onUploadNotes,
   });
 
   @override
@@ -1476,6 +2922,7 @@ class ProfilePage extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     final user = authProvider.user;
     final userName = (user != null) ? '${user.firstName} ${user.lastName}' : 'User Name';
+    final canUploadNotes = user?.role == 'faculty' || user?.role == 'admin';
 
     return ListView(
       key: const ValueKey('profile'),
@@ -1489,10 +2936,7 @@ class ProfilePage extends StatelessWidget {
                 CircleAvatar(
                   radius: 38,
                   backgroundColor: scheme.primary.withValues(alpha: 0.16),
-                  backgroundImage: (user?.profilePicture != null &&
-                          user!.profilePicture!.trim().isNotEmpty)
-                      ? NetworkImage(user.profilePicture!.trim())
-                      : null,
+                  backgroundImage: _profileImageProvider(user?.profilePicture),
                   child: (user?.profilePicture == null ||
                           user!.profilePicture!.trim().isEmpty)
                       ? Icon(Icons.person, size: 40, color: scheme.primary)
@@ -1545,6 +2989,15 @@ class ProfilePage extends StatelessWidget {
                 trailing: const Icon(Icons.chevron_right_rounded),
                 onTap: onHelp,
               ),
+              if (canUploadNotes) ...[
+                const Divider(height: 1),
+                ListTile(
+                  leading: const Icon(Icons.upload_file_rounded),
+                  title: const Text('Upload Study Materials'),
+                  trailing: const Icon(Icons.chevron_right_rounded),
+                  onTap: onUploadNotes,
+                ),
+              ],
             ],
           ),
         ),

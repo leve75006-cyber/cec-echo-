@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import 'providers/auth_provider.dart';
 import 'providers/home_provider.dart';
 import 'providers/theme_provider.dart';
+import 'screens/admin/admin_portal_screen.dart';
 import 'screens/auth/login_screen.dart';
 import 'screens/auth/register_screen.dart';
 import 'screens/home/home_screen.dart';
@@ -33,6 +34,7 @@ class CECApp extends StatelessWidget {
             routes: {
               '/login': (context) => const LoginScreen(),
               '/register': (context) => const RegisterScreen(),
+              '/admin-portal': (context) => const AdminPortalScreen(),
             },
             home: const AppBootstrapScreen(),
           );
@@ -251,6 +253,7 @@ class AppBootstrapScreen extends StatefulWidget {
 
 class _AppBootstrapScreenState extends State<AppBootstrapScreen> {
   bool _initializing = true;
+  static const Duration _minSplashDuration = Duration(milliseconds: 1800);
 
   @override
   void initState() {
@@ -260,10 +263,13 @@ class _AppBootstrapScreenState extends State<AppBootstrapScreen> {
 
   Future<void> _init() async {
     final auth = context.read<AuthProvider>();
-    await auth.tryAutoLogin().timeout(
-      const Duration(seconds: 3),
-      onTimeout: () => false,
-    );
+    await Future.wait([
+      auth.tryAutoLogin().timeout(
+        const Duration(seconds: 3),
+        onTimeout: () => false,
+      ),
+      Future.delayed(_minSplashDuration),
+    ]);
     if (!mounted) {
       return;
     }
@@ -275,9 +281,14 @@ class _AppBootstrapScreenState extends State<AppBootstrapScreen> {
     if (_initializing) {
       return const SplashScreen();
     }
-    return context.watch<AuthProvider>().isAuthenticated
-        ? const HomeScreen()
-        : const LoginScreen();
+    final auth = context.watch<AuthProvider>();
+    if (!auth.isAuthenticated) {
+      return const LoginScreen();
+    }
+    if (auth.user?.role == 'admin') {
+      return const AdminPortalScreen();
+    }
+    return const HomeScreen();
   }
 }
 

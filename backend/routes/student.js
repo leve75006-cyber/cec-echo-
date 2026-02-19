@@ -7,7 +7,8 @@ const {
   getUnreadMessagesCount,
   getStudentDashboard,
   getChatUsers,
-  getStudyMaterialsByCourseCode
+  getStudyMaterialsByCourseCode,
+  createStudyMaterial,
 } = require('../controllers/studentController');
 const { protect, authorize } = require('../middleware/auth');
 
@@ -34,5 +35,8 @@ router.route('/users')
 
 router.route('/study-materials/:courseCode')
   .get(getStudyMaterialsByCourseCode);
+
+router.route('/study-materials')
+  .post(authorize('admin', 'faculty'), createStudyMaterial);
 
 module.exports = router;

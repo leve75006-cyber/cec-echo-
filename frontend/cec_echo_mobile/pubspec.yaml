@@ -42,6 +42,8 @@ dependencies:
 
   # Image handling
   cached_network_image: ^3.3.0
+  image_picker: ^1.1.2
+  file_picker: ^8.1.2
 
   # Socket.IO client for real-time communication
   socket_io_client: ^2.0.1

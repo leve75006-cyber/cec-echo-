@@ -201,6 +201,14 @@ class ApiService {
     return response;
   }
 
+  static Future<http.Response> getGroupMessages(String groupId) async {
+    final headers = await getAuthHeaders();
+    return http.get(
+      Uri.parse('$baseUrl/chat/messages/group/$groupId'),
+      headers: headers,
+    );
+  }
+
   static Future<http.Response> sendMessage(
     Map<String, dynamic> messageData,
   ) async {
@@ -232,6 +240,18 @@ class ApiService {
       body: jsonEncode(groupData),
     );
     return response;
+  }
+
+  static Future<http.Response> addGroupMember(
+    String groupId,
+    Map<String, dynamic> payload,
+  ) async {
+    final headers = await getAuthHeaders();
+    return http.put(
+      Uri.parse('$baseUrl/chat/groups/add-member/$groupId'),
+      headers: headers,
+      body: jsonEncode(payload),
+    );
   }
 
   // Student APIs
@@ -286,6 +306,17 @@ class ApiService {
     );
   }
 
+  static Future<http.Response> createStudyMaterial(
+    Map<String, dynamic> payload,
+  ) async {
+    final headers = await getAuthHeaders();
+    return http.post(
+      Uri.parse('$baseUrl/student/study-materials'),
+      headers: headers,
+      body: jsonEncode(payload),
+    );
+  }
+
   // Chatbot APIs
   static Future<http.Response> getChatbotResponse(String query) async {
     final headers = await getAuthHeaders();
@@ -313,6 +344,56 @@ class ApiService {
       Uri.parse('$baseUrl/chatbot/exam-topics'),
       headers: headers,
       body: jsonEncode({'subject': subject}),
+    );
+  }
+
+  // Admin APIs
+  static Future<http.Response> getAdminDashboard() async {
+    final headers = await getAuthHeaders();
+    return http.get(
+      Uri.parse('$baseUrl/admin/dashboard'),
+      headers: headers,
+    );
+  }
+
+  static Future<http.Response> getAdminUsers() async {
+    final headers = await getAuthHeaders();
+    return http.get(
+      Uri.parse('$baseUrl/admin/users?limit=200&page=1'),
+      headers: headers,
+    );
+  }
+
+  static Future<http.Response> createFaculty(Map<String, dynamic> payload) async {
+    final headers = await getAuthHeaders();
+    return http.post(
+      Uri.parse('$baseUrl/admin/faculty'),
+      headers: headers,
+      body: jsonEncode(payload),
+    );
+  }
+
+  static Future<http.Response> deleteFaculty(String userId) async {
+    final headers = await getAuthHeaders();
+    return http.delete(
+      Uri.parse('$baseUrl/admin/faculty/$userId'),
+      headers: headers,
+    );
+  }
+
+  static Future<http.Response> deleteStudentByRegNo(String registrationNumber) async {
+    final headers = await getAuthHeaders();
+    return http.delete(
+      Uri.parse('$baseUrl/admin/students/by-reg/$registrationNumber'),
+      headers: headers,
+    );
+  }
+
+  static Future<http.Response> cleanupExpiredCecAssembleStudents() async {
+    final headers = await getAuthHeaders();
+    return http.post(
+      Uri.parse('$baseUrl/admin/groups/cec-assemble/cleanup'),
+      headers: headers,
     );
   }
 }

@@ -1,4 +1,4 @@
-const { createCall, updateCall, getCallById, getUserById } = require('./supabaseDb');
+const { createCall, updateCall, getCallById, getUserById, getGroupById } = require('./supabaseDb');
 
 const webrtcConfig = {
   iceServers: [
@@ -119,6 +119,12 @@ const initializeWebRTC = (io) => {
     socket.on('initiate-broadcast', async (data) => {
       try {
         const { groupId, from, callType } = data;
+        const group = await getGroupById(groupId);
+        const isMember = Boolean(group && (group.members || []).some((member) => member.user === from));
+        if (!isMember) {
+          socket.emit('call-error', { message: 'Not authorized for this group call.' });
+          return;
+        }
 
         const call = await createCall({
           caller: from,

@@ -214,6 +214,10 @@ class AuthProvider with ChangeNotifier {
       }
       return {'message': 'Unexpected server response'};
     } catch (_) {
+      final raw = response.body.trim();
+      if (raw.isNotEmpty) {
+        return {'message': raw};
+      }
       return {'message': 'Server error occurred'};
     }
   }

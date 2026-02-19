@@ -1,4 +1,4 @@
-const { createMessage, enrichMessages, getUserById } = require('./supabaseDb');
+const { createMessage, enrichMessages, getUserById, getGroupById } = require('./supabaseDb');
 const { initializeWebRTC } = require('./webrtcHandler');
 
 let io;
@@ -52,12 +52,21 @@ const initializeSocket = (server) => {
           socket.emit('error', { message: 'Sender not found' });
           return;
         }
+        const group = await getGroupById(data.groupId);
+        const isMember = Boolean(group && (group.members || []).some((member) => member.user === data.senderId));
+        if (!isMember) {
+          socket.emit('error', { message: 'Not authorized for this group' });
+          return;
+        }
 
         const message = await createMessage({
           sender: data.senderId,
           groupId: data.groupId,
           content: data.content,
           messageType: data.messageType || 'text',
+          fileUrl: data.fileUrl,
+          fileName: data.fileName,
+          fileSize: data.fileSize,
         });
         const [populated] = await enrichMessages([message]);
 

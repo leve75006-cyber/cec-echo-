@@ -4,7 +4,11 @@ const {
   getDashboardStats, 
   getAllUsers, 
   getAllAnnouncements, 
-  updateUserRole 
+  updateUserRole,
+  createFaculty,
+  deleteFaculty,
+  deleteStudentByRegNo,
+  cleanupExpiredCecStudents,
 } = require('../controllers/adminController');
 const { protect, authorize } = require('../middleware/auth');
 
@@ -23,5 +27,17 @@ router.route('/announcements')
 
 router.route('/users/role/:id')
   .put(updateUserRole);
+
+router.route('/faculty')
+  .post(createFaculty);
+
+router.route('/faculty/:id')
+  .delete(deleteFaculty);
+
+router.route('/students/by-reg/:registrationNumber')
+  .delete(deleteStudentByRegNo);
+
+router.route('/groups/cec-assemble/cleanup')
+  .post(cleanupExpiredCecStudents);
 
 module.exports = router;

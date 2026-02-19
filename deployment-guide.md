@@ -21,9 +21,10 @@
 
 1. Create account at https://render.com
 2. Push repository to GitHub/GitLab
-3. Create Web Service and connect repo
-4. Set environment variables (see below)
-5. Deploy
+3. In Render, choose **New +** -> **Blueprint**
+4. Select this repository (Render will read `render.yaml`)
+5. Fill required secret values (see environment section below)
+6. Deploy
 
 ### Option 2: Railway
 

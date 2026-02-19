@@ -7,7 +7,15 @@ const {
   enrichAnnouncements,
   enrichMessages,
   updateUser,
+  createUser,
+  deleteUser,
+  findUserByUniqueFields,
 } = require('../utils/supabaseDb');
+const bcrypt = require('bcryptjs');
+const {
+  removeUserFromCecAssemble,
+  cleanupExpiredStudentsFromCecAssemble,
+} = require('../utils/defaultGroups');
 
 exports.getDashboardStats = async (req, res) => {
   try {
@@ -190,6 +198,137 @@ exports.updateUserRole = async (req, res) => {
     return res.status(200).json({
       success: true,
       data: user,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+exports.createFaculty = async (req, res) => {
+  try {
+    const { username, email, password, firstName, lastName, department, registrationNumber } = req.body || {};
+
+    if (!username || !email || !password || !firstName || !lastName) {
+      return res.status(400).json({
+        success: false,
+        message: 'username, email, password, firstName, and lastName are required',
+      });
+    }
+
+    const duplicate = await findUserByUniqueFields({ email, username, registrationNumber });
+    if (duplicate) {
+      return res.status(400).json({
+        success: false,
+        message: 'User already exists with this email, username or registration number',
+      });
+    }
+
+    const hashedPassword = await bcrypt.hash(String(password), 10);
+    const faculty = await createUser({
+      username: String(username).trim(),
+      email: String(email).trim().toLowerCase(),
+      password: hashedPassword,
+      firstName: String(firstName).trim(),
+      lastName: String(lastName).trim(),
+      role: 'faculty',
+      department: department ? String(department).trim() : '',
+      registrationNumber: registrationNumber ? String(registrationNumber).trim() : '',
+      isActive: true,
+    });
+
+    return res.status(201).json({
+      success: true,
+      data: faculty,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+exports.deleteFaculty = async (req, res) => {
+  try {
+    const users = await listUsers(false);
+    const faculty = users.find((user) => user.id === req.params.id);
+
+    if (!faculty) {
+      return res.status(404).json({
+        success: false,
+        message: 'Faculty not found',
+      });
+    }
+    if (faculty.role !== 'faculty') {
+      return res.status(400).json({
+        success: false,
+        message: 'Target user is not a faculty',
+      });
+    }
+
+    await deleteUser(faculty.id);
+    await removeUserFromCecAssemble(faculty.id);
+
+    return res.status(200).json({
+      success: true,
+      data: {},
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+exports.deleteStudentByRegNo = async (req, res) => {
+  try {
+    const registrationNumber = String(req.params.registrationNumber || '').trim().toUpperCase();
+    if (!registrationNumber) {
+      return res.status(400).json({
+        success: false,
+        message: 'Registration number is required',
+      });
+    }
+
+    const users = await listUsers(false);
+    const student = users.find(
+      (user) =>
+        user.role === 'student' &&
+        String(user.registrationNumber || '').trim().toUpperCase() === registrationNumber
+    );
+
+    if (!student) {
+      return res.status(404).json({
+        success: false,
+        message: 'Student not found for the provided registration number',
+      });
+    }
+
+    await deleteUser(student.id);
+    await removeUserFromCecAssemble(student.id);
+
+    return res.status(200).json({
+      success: true,
+      data: {},
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+exports.cleanupExpiredCecStudents = async (req, res) => {
+  try {
+    const result = await cleanupExpiredStudentsFromCecAssemble();
+    return res.status(200).json({
+      success: true,
+      data: result,
     });
   } catch (error) {
     return res.status(500).json({

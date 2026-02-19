@@ -22,6 +22,7 @@ class HomeProvider with ChangeNotifier {
 
   List<Announcement> _announcements = [];
   List<Message> _messages = [];
+  List<Group> _groups = [];
   List<User> _allUsers = [];
   List<CallInvite> _incomingCalls = [];
   List<CallInvite> _outgoingCalls = [];
@@ -36,6 +37,7 @@ class HomeProvider with ChangeNotifier {
   String? get error => _error;
   List<Announcement> get announcements => _announcements;
   List<Message> get messages => _messages;
+  List<Group> get groups => _groups;
   List<User> get allUsers => _allUsers;
   List<CallInvite> get incomingCalls => List.unmodifiable(_incomingCalls);
   List<CallInvite> get outgoingCalls => List.unmodifiable(_outgoingCalls);
@@ -48,6 +50,9 @@ class HomeProvider with ChangeNotifier {
     }
     final map = <String, User>{};
     for (final msg in _messages) {
+      if (msg.groupId != null && msg.groupId!.isNotEmpty) {
+        continue;
+      }
       final sender = msg.sender;
       final receiver = msg.receiver;
 
@@ -91,6 +96,7 @@ class HomeProvider with ChangeNotifier {
       refreshDashboard(),
       refreshAnnouncements(),
       refreshMessages(),
+      refreshGroups(),
       refreshUsers(),
     ]);
   }
@@ -99,6 +105,7 @@ class HomeProvider with ChangeNotifier {
     await Future.wait([
       refreshAnnouncements(),
       refreshMessages(),
+      refreshGroups(),
       refreshUsers(),
     ]);
   }
@@ -162,6 +169,26 @@ class HomeProvider with ChangeNotifier {
     }
   }
 
+  Future<void> refreshGroups() async {
+    try {
+      final response = await ApiService.getGroups();
+      final jsonData = _decode(response.body);
+
+      if (response.statusCode == 200 && jsonData['success'] == true) {
+        final items = (jsonData['data'] as List<dynamic>? ?? []);
+        _groups = items
+            .whereType<Map<String, dynamic>>()
+            .map(Group.fromJson)
+            .toList();
+        _joinGroupRooms();
+        notifyListeners();
+      }
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+    }
+  }
+
   Future<void> refreshUsers() async {
     try {
       final response = await ApiService.getStudentUsers();
@@ -196,19 +223,43 @@ class HomeProvider with ChangeNotifier {
     return [];
   }
 
+  Future<List<Message>> getGroupMessages(String groupId) async {
+    final response = await ApiService.getGroupMessages(groupId);
+    final jsonData = _decode(response.body);
+
+    if (response.statusCode == 200 && jsonData['success'] == true) {
+      final items = (jsonData['data'] as List<dynamic>? ?? []);
+      return items
+          .whereType<Map<String, dynamic>>()
+          .map(Message.fromJson)
+          .toList();
+    }
+
+    return [];
+  }
+
   Future<bool> sendDirectMessage({
     required String receiverId,
     required String content,
+    String messageType = 'text',
+    String? fileUrl,
+    String? fileName,
+    int? fileSize,
   }) async {
     final text = content.trim();
-    if (text.isEmpty) {
+    final hasAttachment = (fileUrl ?? '').trim().isNotEmpty;
+    if (text.isEmpty && !hasAttachment) {
       return false;
     }
+    final safeContent = text.isEmpty ? 'Attachment' : text;
 
     final response = await ApiService.sendMessage({
       'receiver': receiverId,
-      'content': text,
-      'messageType': 'text',
+      'content': safeContent,
+      'messageType': messageType,
+      'fileUrl': fileUrl,
+      'fileName': fileName,
+      'fileSize': fileSize,
     });
 
     final jsonData = _decode(response.body);
@@ -222,14 +273,132 @@ class HomeProvider with ChangeNotifier {
       _socket?.emit('private-message', {
         'senderId': _currentUser?.id,
         'receiverId': receiverId,
-        'content': text,
-        'messageType': 'text',
+        'content': safeContent,
+        'messageType': messageType,
+        'fileUrl': fileUrl,
+        'fileName': fileName,
+        'fileSize': fileSize,
       });
 
       await refreshDashboard();
       return true;
     }
     return false;
+  }
+
+  Future<bool> sendGroupMessage({
+    required String groupId,
+    required String content,
+    String messageType = 'text',
+    String? fileUrl,
+    String? fileName,
+    int? fileSize,
+  }) async {
+    final text = content.trim();
+    final hasAttachment = (fileUrl ?? '').trim().isNotEmpty;
+    if (text.isEmpty && !hasAttachment) {
+      return false;
+    }
+    final safeContent = text.isEmpty ? 'Attachment' : text;
+
+    final response = await ApiService.sendMessage({
+      'groupId': groupId,
+      'content': safeContent,
+      'messageType': messageType,
+      'fileUrl': fileUrl,
+      'fileName': fileName,
+      'fileSize': fileSize,
+    });
+    final jsonData = _decode(response.body);
+
+    if (response.statusCode == 201 && jsonData['success'] == true) {
+      final raw = jsonData['data'];
+      if (raw is Map<String, dynamic>) {
+        _messages.insert(0, Message.fromJson(raw));
+        notifyListeners();
+      }
+
+      _socket?.emit('group-message', {
+        'senderId': _currentUser?.id,
+        'groupId': groupId,
+        'content': safeContent,
+        'messageType': messageType,
+        'fileUrl': fileUrl,
+        'fileName': fileName,
+        'fileSize': fileSize,
+      });
+      await refreshDashboard();
+      return true;
+    }
+    return false;
+  }
+
+  Future<bool> createStudentGroup({
+    required String name,
+    String? description,
+    required List<String> memberIds,
+  }) async {
+    final cleanName = name.trim();
+    if (cleanName.isEmpty) {
+      return false;
+    }
+    final response = await ApiService.createGroup({
+      'name': cleanName,
+      'description': description?.trim() ?? '',
+      'members': memberIds,
+      'isPrivate': false,
+    });
+    final jsonData = _decode(response.body);
+    if (response.statusCode == 201 && jsonData['success'] == true) {
+      final raw = jsonData['data'];
+      if (raw is Map<String, dynamic>) {
+        final created = Group.fromJson(raw);
+        _groups.insert(0, created);
+        _socket?.emit('join-room', created.id);
+        notifyListeners();
+      } else {
+        await refreshGroups();
+      }
+      await refreshDashboard();
+      return true;
+    }
+    return false;
+  }
+
+  Future<bool> addMembersToGroup({
+    required Group group,
+    required List<String> userIds,
+  }) async {
+    if (userIds.isEmpty) {
+      return false;
+    }
+
+    var allOk = true;
+    for (final userId in userIds) {
+      final response = await ApiService.addGroupMember(group.id, {
+        'userId': userId,
+        'role': 'member',
+      });
+      final jsonData = _decode(response.body);
+      if (!(response.statusCode == 200 && jsonData['success'] == true)) {
+        allOk = false;
+      }
+    }
+
+    await refreshGroups();
+    await refreshDashboard();
+    return allOk;
+  }
+
+  void startGroupVoiceChat(String groupId) {
+    if (_socket == null || _currentUser == null) {
+      return;
+    }
+    _socket!.emit('initiate-broadcast', {
+      'groupId': groupId,
+      'from': _currentUser!.id,
+      'callType': 'audio',
+    });
   }
 
   Future<void> toggleLike(String announcementId) async {
@@ -273,6 +442,38 @@ class HomeProvider with ChangeNotifier {
         }
       }
     }
+  }
+
+  Future<bool> createAnnouncementCircular({
+    required String title,
+    required String content,
+    required String category,
+    required String priority,
+    List<Map<String, String>> attachments = const [],
+  }) async {
+    final cleanTitle = title.trim();
+    final cleanContent = content.trim();
+    if (cleanTitle.isEmpty || cleanContent.isEmpty) {
+      return false;
+    }
+
+    final response = await ApiService.createAnnouncement({
+      'title': cleanTitle,
+      'content': cleanContent,
+      'category': category.trim().isEmpty ? 'general' : category.trim(),
+      'priority': priority.trim().isEmpty ? 'medium' : priority.trim(),
+      'targetAudience': const ['all'],
+      'attachments': attachments,
+    });
+    final jsonData = _decode(response.body);
+    if (response.statusCode == 201 && jsonData['success'] == true) {
+      await refreshAnnouncements();
+      await refreshDashboard();
+      return true;
+    }
+    _error = jsonData['message']?.toString() ?? 'Unable to post circular';
+    notifyListeners();
+    return false;
   }
 
   Future<String?> askAssistant(String query) async {
@@ -333,6 +534,7 @@ class HomeProvider with ChangeNotifier {
 
     _announcements = [];
     _messages = [];
+    _groups = [];
     _allUsers = [];
     _incomingCalls = [];
     _outgoingCalls = [];
@@ -365,6 +567,7 @@ class HomeProvider with ChangeNotifier {
     _socket!.onConnect((_) {
       _socket!.emit('join-room', _currentUser!.id);
       _socket!.emit('set-online-status', _currentUser!.id);
+      _joinGroupRooms();
     });
 
     _socket!.off('incoming-call');
@@ -375,6 +578,13 @@ class HomeProvider with ChangeNotifier {
     _socket!.off('call-error');
 
     _socket!.on('receive-private-message', (payload) {
+      if (payload is Map<String, dynamic>) {
+        _messages.insert(0, Message.fromJson(payload));
+        notifyListeners();
+      }
+    });
+
+    _socket!.on('receive-group-message', (payload) {
       if (payload is Map<String, dynamic>) {
         _messages.insert(0, Message.fromJson(payload));
         notifyListeners();
@@ -475,7 +685,18 @@ class HomeProvider with ChangeNotifier {
       refreshDashboard();
       refreshAnnouncements();
       refreshMessages();
+      refreshGroups();
     });
+  }
+
+  void _joinGroupRooms() {
+    final socket = _socket;
+    if (socket == null) {
+      return;
+    }
+    for (final group in _groups) {
+      socket.emit('join-room', group.id);
+    }
   }
 
   Map<String, dynamic> _decode(String raw) {

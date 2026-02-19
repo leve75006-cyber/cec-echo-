@@ -3,6 +3,7 @@ const router = express.Router();
 const { 
   getMessages, 
   getDirectMessages, 
+  getGroupMessages,
   sendMessage, 
   createGroup, 
   getGroups, 
@@ -20,6 +21,9 @@ router.route('/messages')
 
 router.route('/messages/:userId')
   .get(protect, getDirectMessages);
+
+router.route('/messages/group/:groupId')
+  .get(protect, getGroupMessages);
 
 // Groups
 router.route('/groups')

@@ -15,16 +15,22 @@ const {
   updateCall,
   enrichCalls,
 } = require('../utils/supabaseDb');
+const { ensureStudentInCecAssemble, cleanupExpiredStudentsFromCecAssemble } = require('../utils/defaultGroups');
 
 exports.getMessages = async (req, res) => {
   try {
+    const myGroups = (await listGroups()).filter((group) =>
+      (group.members || []).some((member) => member.user === req.user.id)
+    );
+    const myGroupIds = new Set(myGroups.map((group) => group.id));
+
     const messages = (await listMessages())
-      .filter(
-        (message) =>
-          message.sender === req.user.id ||
-          message.receiver === req.user.id ||
-          Boolean(message.groupId)
-      )
+      .filter((message) => {
+        if (message.sender === req.user.id || message.receiver === req.user.id) {
+          return true;
+        }
+        return Boolean(message.groupId) && myGroupIds.has(message.groupId);
+      })
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
       .slice(0, 100);
 
@@ -77,7 +83,7 @@ exports.getDirectMessages = async (req, res) => {
 
 exports.sendMessage = async (req, res) => {
   try {
-    const { receiver, content, messageType, groupId } = req.body;
+    const { receiver, content, messageType, groupId, fileUrl, fileName, fileSize } = req.body;
 
     if (!receiver && !groupId) {
       return res.status(400).json({
@@ -102,18 +108,60 @@ exports.sendMessage = async (req, res) => {
       }
     }
 
+    if (groupId) {
+      const group = await getGroupById(groupId);
+      const isMember = Boolean(group && (group.members || []).some((member) => member.user === req.user.id));
+      if (!isMember) {
+        return res.status(403).json({
+          success: false,
+          message: 'You are not a member of this group',
+        });
+      }
+    }
+
     const message = await createMessage({
       sender: req.user.id,
       receiver,
       content,
       messageType,
       groupId,
+      fileUrl,
+      fileName,
+      fileSize,
     });
 
     const populated = await enrichMessages([message]);
     return res.status(201).json({
       success: true,
       data: populated[0],
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+exports.getGroupMessages = async (req, res) => {
+  try {
+    const groupId = req.params.groupId;
+    const group = await getGroupById(groupId);
+    if (!group || !(group.members || []).some((member) => member.user === req.user.id)) {
+      return res.status(404).json({
+        success: false,
+        message: 'Group not found or you are not a member',
+      });
+    }
+
+    const messages = (await listMessages())
+      .filter((message) => !message.isDeleted && message.groupId === groupId)
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+    const populated = await enrichMessages(messages);
+    return res.status(200).json({
+      success: true,
+      data: populated,
     });
   } catch (error) {
     return res.status(500).json({
@@ -175,6 +223,11 @@ exports.createGroup = async (req, res) => {
 
 exports.getGroups = async (req, res) => {
   try {
+    await cleanupExpiredStudentsFromCecAssemble();
+    if (req.user.role === 'student') {
+      await ensureStudentInCecAssemble(req.user.id);
+    }
+
     const groups = (await listGroups()).filter((group) =>
       (group.members || []).some((member) => member.user === req.user.id)
     );
@@ -194,6 +247,11 @@ exports.getGroups = async (req, res) => {
 
 exports.getGroup = async (req, res) => {
   try {
+    await cleanupExpiredStudentsFromCecAssemble();
+    if (req.user.role === 'student') {
+      await ensureStudentInCecAssemble(req.user.id);
+    }
+
     const group = await getGroupById(req.params.id);
     if (!group || !(group.members || []).some((member) => member.user === req.user.id)) {
       return res.status(404).json({
@@ -274,6 +332,16 @@ exports.initiateCall = async (req, res) => {
         return res.status(404).json({
           success: false,
           message: 'Callee not found',
+        });
+      }
+    }
+    if (groupId) {
+      const group = await getGroupById(groupId);
+      const isMember = Boolean(group && (group.members || []).some((member) => member.user === req.user.id));
+      if (!isMember) {
+        return res.status(403).json({
+          success: false,
+          message: 'You are not a member of this group',
         });
       }
     }

@@ -520,6 +520,29 @@ const listStudyMaterials = async () => {
   return (data || []).map(mapStudyMaterial);
 };
 
+const createStudyMaterial = async (payload) => {
+  const insertPayload = {
+    title: payload.title,
+    description: payload.description || '',
+    course_code: payload.courseCode,
+    subject_name: payload.subjectName || '',
+    department: payload.department || '',
+    semester: payload.semester || '',
+    material_type: payload.materialType || 'notes',
+    resource_url: payload.resourceUrl || '',
+    tags: payload.tags || [],
+    is_published: payload.isPublished !== false,
+    uploaded_by: payload.uploadedBy || null,
+  };
+  const { data, error } = await supabase
+    .from('study_materials')
+    .insert(insertPayload)
+    .select(STUDY_MATERIAL_SELECT)
+    .single();
+  throwOnError(error);
+  return mapStudyMaterial(data);
+};
+
 module.exports = {
   supabase,
   listUsers,
@@ -550,5 +573,6 @@ module.exports = {
   updateCall,
   enrichCalls,
   listStudyMaterials,
+  createStudyMaterial,
   fetchUsersByIds,
 };

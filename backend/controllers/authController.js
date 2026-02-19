@@ -7,6 +7,9 @@ const {
   createUser,
   updateUser,
 } = require('../utils/supabaseDb');
+const { ensureStudentInCecAssemble } = require('../utils/defaultGroups');
+
+const ALLOWED_SELF_REGISTER_ROLES = ['student', 'faculty'];
 
 const toPublicUser = (user) => ({
   id: user._id || user.id,
@@ -49,17 +52,29 @@ exports.register = async (req, res) => {
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
+    const requestedRole = String(role || 'student').toLowerCase();
+    if (!ALLOWED_SELF_REGISTER_ROLES.includes(requestedRole)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Role is not allowed for self registration',
+      });
+    }
+
     const user = await createUser({
       username: String(username).trim(),
       email: String(email).trim().toLowerCase(),
       password: hashedPassword,
       firstName: String(firstName).trim(),
       lastName: String(lastName).trim(),
-      role: role || 'student',
+      role: requestedRole,
       department: department ? String(department).trim() : '',
       registrationNumber: registrationNumber ? String(registrationNumber).trim() : '',
       isActive: true,
     });
+
+    if (user.role === 'student') {
+      await ensureStudentInCecAssemble(user.id);
+    }
 
     const token = generateToken(user.id);
     res.cookie('token', token, {
@@ -108,6 +123,11 @@ exports.login = async (req, res) => {
     }
 
     const updatedUser = await updateUser(user.id, { lastLogin: new Date().toISOString() });
+
+    if (user.role === 'student') {
+      await ensureStudentInCecAssemble(user.id);
+    }
+
     const token = generateToken(user.id);
 
     return res.status(200).json({

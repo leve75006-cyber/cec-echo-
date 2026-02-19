@@ -8,7 +8,9 @@ const {
   listUsers,
   getUserById,
   listStudyMaterials,
+  createStudyMaterial: createStudyMaterialRecord,
 } = require('../utils/supabaseDb');
+const { ensureStudentInCecAssemble, cleanupExpiredStudentsFromCecAssemble } = require('../utils/defaultGroups');
 
 const isStudentVisibleAnnouncement = (announcement, userDepartment) => {
   const audience = announcement.targetAudience || [];
@@ -124,6 +126,11 @@ exports.getUnreadMessagesCount = async (req, res) => {
 
 exports.getStudentDashboard = async (req, res) => {
   try {
+    await cleanupExpiredStudentsFromCecAssemble();
+    if (req.user.role === 'student') {
+      await ensureStudentInCecAssemble(req.user.id);
+    }
+
     const [announcements, messages, groups] = await Promise.all([
       listAnnouncements(),
       listMessages(),
@@ -214,6 +221,46 @@ exports.getStudyMaterialsByCourseCode = async (req, res) => {
       success: true,
       count: materials.length,
       data: materials,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+exports.createStudyMaterial = async (req, res) => {
+  try {
+    const title = (req.body?.title || '').trim();
+    const courseCode = (req.body?.courseCode || '').toUpperCase().trim();
+
+    if (!title || !courseCode) {
+      return res.status(400).json({
+        success: false,
+        message: 'Title and courseCode are required',
+      });
+    }
+
+    const material = await createStudyMaterialRecord({
+      title,
+      description: (req.body?.description || '').trim(),
+      courseCode,
+      subjectName: (req.body?.subjectName || '').trim(),
+      department: (req.body?.department || req.user.department || '').trim(),
+      semester: (req.body?.semester || '').trim(),
+      materialType: (req.body?.materialType || 'notes').trim(),
+      resourceUrl: (req.body?.resourceUrl || '').trim(),
+      tags: Array.isArray(req.body?.tags)
+        ? req.body.tags.map((t) => String(t).trim()).filter(Boolean)
+        : [],
+      isPublished: req.body?.isPublished !== false,
+      uploadedBy: req.user.id,
+    });
+
+    return res.status(201).json({
+      success: true,
+      data: material,
     });
   } catch (error) {
     return res.status(500).json({
